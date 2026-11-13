@@ -185,6 +185,10 @@ var migrations = [][]string{
 		`CREATE INDEX tasks_done ON tasks(done_at)`,
 		`CREATE INDEX tasks_conversation ON tasks(conversation_id)`,
 	},
+	// 8: force a password change on first sign-in (set for the bootstrap admin).
+	{
+		`ALTER TABLE agents ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0`,
+	},
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
@@ -225,7 +229,9 @@ type Agent struct {
 	Away      bool   `json:"away"`
 	CreatedAt int64  `json:"created_at"`
 	Online    bool   `json:"online"`
-	hash      string
+	// MustChangePassword: the API is locked until this agent sets a new password.
+	MustChangePassword bool `json:"must_change_password"`
+	hash               string
 }
 
 type Contact struct {
@@ -309,11 +315,11 @@ type Message struct {
 
 // ---------- agents ----------
 
-const agentCols = `id, email, name, role, password_hash, disabled, away, created_at`
+const agentCols = `id, email, name, role, password_hash, disabled, away, created_at, must_change_password`
 
 func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 	a := &Agent{}
-	err := row.Scan(&a.ID, &a.Email, &a.Name, &a.Role, &a.hash, &a.Disabled, &a.Away, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.Email, &a.Name, &a.Role, &a.hash, &a.Disabled, &a.Away, &a.CreatedAt, &a.MustChangePassword)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -369,10 +375,12 @@ func (s *Store) ListAgents(ctx context.Context) ([]*Agent, error) {
 }
 
 type AgentUpdate struct {
-	Name     *string
-	Role     *string
-	Disabled *bool
-	Hash     *string
+	Name               *string
+	Email              *string
+	Role               *string
+	Disabled           *bool
+	Hash               *string
+	MustChangePassword *bool
 }
 
 func (s *Store) UpdateAgent(ctx context.Context, id int64, u AgentUpdate) error {
@@ -389,12 +397,21 @@ func (s *Store) UpdateAgent(ctx context.Context, id int64, u AgentUpdate) error 
 	if u.Hash != nil {
 		sets, args = append(sets, "password_hash = ?"), append(args, *u.Hash)
 	}
+	if u.Email != nil {
+		sets, args = append(sets, "email = ?"), append(args, *u.Email)
+	}
+	if u.MustChangePassword != nil {
+		sets, args = append(sets, "must_change_password = ?"), append(args, *u.MustChangePassword)
+	}
 	if len(sets) == 0 {
 		return nil
 	}
 	args = append(args, id)
 	res, err := s.db.ExecContext(ctx, `UPDATE agents SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return errDuplicate
+		}
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
@@ -419,7 +436,7 @@ func (s *Store) CreateSession(ctx context.Context, tokenHash string, agentID int
 
 func (s *Store) SessionAgent(ctx context.Context, tokenHash string) (*Agent, error) {
 	return scanAgent(s.db.QueryRowContext(ctx,
-		`SELECT a.id, a.email, a.name, a.role, a.password_hash, a.disabled, a.away, a.created_at
+		`SELECT a.id, a.email, a.name, a.role, a.password_hash, a.disabled, a.away, a.created_at, a.must_change_password
 		 FROM sessions s JOIN agents a ON a.id = s.agent_id
 		 WHERE s.token_hash = ? AND s.expires_at > ? AND a.disabled = 0`, tokenHash, nowMs()))
 }

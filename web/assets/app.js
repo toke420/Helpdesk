@@ -341,6 +341,50 @@ function renderLogin() {
   email.focus();
 }
 
+// First sign-in with a password from setup (or the logs): pick your own
+// before anything else. The server refuses every other request until then.
+function renderFirstPassword() {
+  const me = state.me;
+  const err = h('div', { class: 'error', role: 'alert' });
+  const name = h('input', { class: 'input', type: 'text', autocomplete: 'name', required: true, maxlength: 100, value: me.name });
+  const email = h('input', { class: 'input', type: 'email', autocomplete: 'username', required: true, value: me.email });
+  const cur = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', required: true });
+  const nw = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', required: true, minlength: 10 });
+  const again = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', required: true, minlength: 10 });
+  const btn = h('button', { class: 'btn primary', type: 'submit' }, 'Save and continue');
+  const form = h('form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      if (nw.value !== again.value) { err.textContent = 'The new passwords don\'t match.'; again.focus(); return; }
+      btn.disabled = true;
+      try {
+        await api('PUT', '/api/me/password', { current: cur.value, new: nw.value, name: name.value, email: email.value });
+        await boot();
+      } catch (ex) {
+        err.textContent = ex.message;
+        btn.disabled = false;
+      }
+    },
+  },
+    h('div', { class: 'logo', html: ICON_LOGO }),
+    h('h1', {}, 'Set up your account'),
+    h('p', {}, 'Before you start, replace the setup password with your own. You can also set your real name and email here.'),
+    h('label', { class: 'field' }, 'Your name', name),
+    h('label', { class: 'field' }, 'Email (you sign in with this)', email),
+    h('label', { class: 'field' }, 'Current password', cur),
+    h('label', { class: 'field' }, 'New password', h('span', { class: 'hint' }, 'At least 10 characters.'), nw),
+    h('label', { class: 'field' }, 'New password again', again),
+    err, btn,
+    h('button', {
+      class: 'btn ghost', type: 'button', style: 'margin-top:8px',
+      onclick: async () => { await api('POST', '/api/auth/logout').catch(() => {}); state.me = null; renderLogin(); },
+    }, 'Sign out'),
+  );
+  fill($app, h('div', { class: 'login' }, form));
+  cur.focus();
+}
+
 // ---------- shell ----------
 function renderShell() {
   els.sidebar = h('nav', { class: 'sidebar', id: 'sidebar', 'aria-label': 'Menu' });
@@ -2258,6 +2302,10 @@ async function boot() {
     state.notifyEmail = me.notify_email || '';
   } catch {
     if (!state.me) renderLogin();
+    return;
+  }
+  if (state.me.must_change_password) {
+    renderFirstPassword();
     return;
   }
   const [a, s] = await Promise.all([api('GET', '/api/agents'), api('GET', '/api/settings')]);

@@ -26,7 +26,7 @@ docker compose up -d --build
 docker compose logs helpdesk   # shows the generated admin password if you left it blank
 ```
 
-**Default sign-in:** `admin@example.com` / `ChangeMe-123` (from `.env.example`). These defaults are public, so change them in `.env` before the first start, or sign in and change the password and email straight away. They're only used to create the first admin on an empty database; editing them later has no effect.
+**Default sign-in:** `admin@example.com` / `ChangeMe-123` (from `.env.example`). On the first sign-in the help desk asks for a new password (and lets you replace the placeholder name and email) before anything else works, so the public default can't stay in use. These settings only create the first admin on an empty database; editing them later has no effect.
 
 Open your `HELPDESK_BASE_URL`, sign in, then go to **Settings → Chat widget** to copy the embed snippet. `/demo` on the same host is a test page with the widget already on it.
 

@@ -249,6 +249,15 @@ func (a *App) agent(h func(http.ResponseWriter, *http.Request, *Agent)) http.Han
 			writeErr(w, http.StatusUnauthorized, "sign in required")
 			return
 		}
+		// Until a forced password change is done, only these work.
+		if ag.MustChangePassword {
+			switch r.Method + " " + r.URL.Path {
+			case "GET /api/me", "PUT /api/me/password", "POST /api/auth/logout":
+			default:
+				writeErr(w, http.StatusForbidden, "password change required")
+				return
+			}
+		}
 		h(w, r, ag)
 	}
 }

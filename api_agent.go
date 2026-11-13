@@ -79,6 +79,9 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request, ag *Agent) 
 	var req struct {
 		Current string `json:"current"`
 		New     string `json:"new"`
+		// Only on the first-sign-in screen: replace the placeholder name/email.
+		Name  *string `json:"name"`
+		Email *string `json:"email"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -91,12 +94,43 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request, ag *Agent) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.New == req.Current {
+		writeErr(w, http.StatusBadRequest, "choose a new password, not the current one")
+		return
+	}
 	h, err := hashPassword(req.New)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	if err := a.store.UpdateAgent(r.Context(), ag.ID, AgentUpdate{Hash: &h}); err != nil {
+	done := false
+	u := AgentUpdate{Hash: &h, MustChangePassword: &done}
+	if ag.MustChangePassword {
+		if req.Name != nil {
+			name := strings.TrimSpace(*req.Name)
+			if name == "" || len(name) > 100 {
+				writeErr(w, http.StatusBadRequest, "enter your name")
+				return
+			}
+			u.Name = &name
+		}
+		if req.Email != nil {
+			email, problem := cleanEmail(*req.Email)
+			if problem == "" && email == "" {
+				problem = "email is required"
+			}
+			if problem != "" {
+				writeErr(w, http.StatusBadRequest, problem)
+				return
+			}
+			email = strings.ToLower(email)
+			u.Email = &email
+		}
+	}
+	if err := a.store.UpdateAgent(r.Context(), ag.ID, u); errors.Is(err, errDuplicate) {
+		writeErr(w, http.StatusBadRequest, "another agent already uses that email")
+		return
+	} else if err != nil {
 		serverError(w, err)
 		return
 	}

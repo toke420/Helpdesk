@@ -198,7 +198,13 @@ func bootstrapAdmin(ctx context.Context, s *Store, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.CreateAgent(ctx, email, "Admin", "admin", h); err != nil {
+	ag, err := s.CreateAgent(ctx, email, "Admin", "admin", h)
+	if err != nil {
+		return err
+	}
+	// The first admin's password came from config or the logs: make them pick their own.
+	must := true
+	if err := s.UpdateAgent(ctx, ag.ID, AgentUpdate{MustChangePassword: &must}); err != nil {
 		return err
 	}
 	if generated {
