@@ -172,3 +172,163 @@ func TestFeedbackBoard(t *testing.T) {
 
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 func idStr(n int64) string  { b, _ := json.Marshal(n); return string(b) }
+
+func TestFeedbackPhase2(t *testing.T) {
+	h := newHarness(t, false)
+	srv := h.app.Routes()
+	ctx := context.Background()
+	h.store.PutSettings(ctx, map[string]string{"feedback_approval": "0"})
+	tok := newToken()
+	h.store.CreateSession(ctx, hashToken(tok), h.agent.ID, time.Now().Add(time.Hour))
+	agent := &fbClient{t: t, srv: srv, cookie: tok}
+	visitor := func(name, email string) *fbClient {
+		c := &fbClient{t: t, srv: srv}
+		_, d := c.do("POST", "/api/widget/session", map[string]any{"create": true})
+		c.token = d["token"].(string)
+		if email != "" {
+			c.do("POST", "/api/widget/profile", map[string]string{"name": name, "email": email})
+		}
+		return c
+	}
+	ann, ben := visitor("Ann Lee", "ann@example.com"), visitor("Ben", "ben@example.com")
+	post := func(c *fbClient, title string) int64 {
+		_, d := c.do("POST", "/api/widget/ideas", map[string]string{"title": title})
+		return int64(d["idea"].(map[string]any)["id"].(float64))
+	}
+	a := post(ann, "Gift wrapping")
+	b := post(ben, "Gift wrap option")
+	ann.do("POST", "/api/widget/ideas/"+idStr(b)+"/vote", map[string]bool{"vote": true}) // Ann voted on both
+
+	// Merge b into a: Ben's vote moves, Ann's isn't counted twice, old link redirects.
+	code, d := agent.do("POST", "/api/ideas/"+idStr(b)+"/merge", map[string]int64{"into": a})
+	if code != 200 || d["votes_added"].(float64) != 1 {
+		t.Fatalf("merge: %d %v", code, d)
+	}
+	_, d = ann.do("GET", "/api/widget/ideas/"+idStr(b), nil)
+	if d["merged_into"].(float64) != float64(a) {
+		t.Fatalf("merged link should redirect: %v", d)
+	}
+	_, d = ann.do("GET", "/api/widget/ideas", nil)
+	if l := ideaList(t, d); len(l) != 1 || l[0]["votes"].(float64) != 2 {
+		t.Fatalf("after merge: %v", d)
+	}
+	if code, _ := agent.do("POST", "/api/ideas/"+idStr(a)+"/merge", map[string]int64{"into": a}); code != 400 {
+		t.Fatal("merge into itself allowed")
+	}
+
+	// Vote on a customer's behalf from their case.
+	cara := h.contact(t, "Cara", "cara@example.com")
+	conv := h.customerSays(t, cara, "Do you gift wrap?")
+	if code, _ := agent.do("POST", "/api/ideas/"+idStr(a)+"/votes", map[string]int64{"conversation_id": conv.ID}); code != 204 {
+		t.Fatal("vote for case")
+	}
+	_, d = agent.do("GET", "/api/conversations/"+idStr(conv.ID)+"/ideas", nil)
+	if l := ideaList(t, d); len(l) != 1 || l[0]["id"].(float64) != float64(a) {
+		t.Fatalf("case ideas: %v", d)
+	}
+	_, d = agent.do("GET", "/api/ideas/"+idStr(a), nil)
+	if d["emailable"].(float64) != 3 {
+		t.Fatalf("should email Ann, Ben, Cara: %v", d["emailable"])
+	}
+
+	// Status change with a note emails each follower once, with an unsubscribe link.
+	h.mu.Lock()
+	h.mail = nil
+	h.mu.Unlock()
+	agent.do("PATCH", "/api/ideas/"+idStr(a), map[string]any{"status": "planned", "note": "Coming in December."})
+	mails := waitFeedbackMail(t, h, 3)
+	var unsub string
+	for _, m := range mails {
+		if !strings.Contains(m.subject, "Planned") || !strings.Contains(m.body, "Coming in December.") || !strings.Contains(m.body, "/feedback#/idea/") {
+			t.Fatalf("status email: %+v", m)
+		}
+		if m.to == "ben@example.com" {
+			unsub = m.body[strings.Index(m.body, "/feedback/unsubscribe?t="):]
+			unsub = strings.TrimSpace(strings.SplitN(unsub, "\n", 2)[0])
+		}
+	}
+	// Ben unsubscribes; the next update skips him.
+	r := httptest.NewRequest("GET", unsub, nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "any more emails about ideas") {
+		t.Fatalf("unsubscribe: %d %s", w.Code, w.Body.String())
+	}
+	_, d = agent.do("GET", "/api/ideas/"+idStr(a), nil)
+	if d["emailable"].(float64) != 2 {
+		t.Fatalf("after unsubscribe: %v", d["emailable"])
+	}
+
+	// Changelog: drafts are private; publishing marks linked ideas Complete and emails.
+	_, d = agent.do("POST", "/api/changelog", map[string]any{"title": "Gift wrapping is here", "body": "Tick the box at checkout.", "idea_ids": []int64{a}})
+	eid := int64(d["entry"].(map[string]any)["id"].(float64))
+	_, d = ann.do("GET", "/api/widget/changelog", nil)
+	if len(d["entries"].([]any)) != 0 {
+		t.Fatal("draft visible to customers")
+	}
+	h.mu.Lock()
+	h.mail = nil
+	h.mu.Unlock()
+	agent.do("POST", "/api/changelog/"+idStr(eid)+"/publish", map[string]bool{"published": true, "notify": true})
+	mails = waitFeedbackMail(t, h, 2)
+	for _, m := range mails {
+		if m.to == "ben@example.com" || !strings.Contains(m.body, "Tick the box at checkout.") {
+			t.Fatalf("shipped email: %+v", m)
+		}
+	}
+	_, d = ann.do("GET", "/api/widget/changelog", nil)
+	es := d["entries"].([]any)
+	if len(es) != 1 || !strings.Contains(mustJSON(es), "Gift wrapping") || strings.Contains(mustJSON(es), "@example.com") {
+		t.Fatalf("public changelog: %v", d)
+	}
+	_, d = ann.do("GET", "/api/widget/ideas/"+idStr(a), nil)
+	if d["idea"].(map[string]any)["status"] != "complete" || !strings.Contains(mustJSON(d), "Shipped") {
+		t.Fatalf("idea after publish: %v", d)
+	}
+	// Publishing again doesn't email twice.
+	agent.do("POST", "/api/changelog/"+idStr(eid)+"/publish", map[string]bool{"published": false})
+	h.mu.Lock()
+	h.mail = nil
+	h.mu.Unlock()
+	agent.do("POST", "/api/changelog/"+idStr(eid)+"/publish", map[string]bool{"published": true, "notify": true})
+	time.Sleep(200 * time.Millisecond)
+	if n := len(feedbackMail(h)); n != 0 {
+		t.Fatalf("republish emailed %d", len(feedbackMail(h)))
+	}
+	// Roadmap lists planned/in progress/complete.
+	_, d = ann.do("GET", "/api/widget/ideas?status=roadmap", nil)
+	if len(ideaList(t, d)) != 1 {
+		t.Fatalf("roadmap: %v", d)
+	}
+}
+
+// feedbackMail: emails sent to customers (not the team's new-chat alerts).
+func feedbackMail(h *harness) []sentMail {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := []sentMail{}
+	for _, m := range h.mail {
+		if m.to != "orders@example.com" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func waitFeedbackMail(t *testing.T, h *harness, n int) []sentMail {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		got := feedbackMail(h)
+		if len(got) >= n {
+			time.Sleep(50 * time.Millisecond)
+			got = feedbackMail(h)
+			if len(got) != n {
+				t.Fatalf("want %d emails, got %d: %+v", n, len(got), got)
+			}
+			return got
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("want %d emails, got %d", n, len(h.mail))
+	return nil
+}

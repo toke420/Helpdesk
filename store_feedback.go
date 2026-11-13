@@ -141,6 +141,8 @@ func (s *Store) ListIdeas(ctx context.Context, f IdeaFilter) ([]*Idea, error) {
 	}
 	switch {
 	case f.Status == "":
+	case f.Status == "roadmap":
+		conds = append(conds, "i.status IN ('planned','in_progress','complete')")
 	case f.Status == "active":
 		conds = append(conds, "i.status <> 'closed'")
 	case validIdeaStatus(f.Status):
@@ -374,4 +376,284 @@ func (s *Store) IdeaVoters(ctx context.Context, ideaID int64) ([]*IdeaVoter, err
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// ---------- merging ----------
+
+// mergeError is a merge the agent asked for that can't be done.
+type mergeError string
+
+func (e mergeError) Error() string { return string(e) }
+
+// MergeIdea folds src into dst: votes (deduplicated) and comments move,
+// src disappears from the board, and links to it lead to dst.
+func (s *Store) MergeIdea(ctx context.Context, src, dst int64) (moved int, err error) {
+	if src == dst {
+		return 0, mergeError("can't merge an idea into itself")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var srcMerged, dstMerged sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT merged_into FROM ideas WHERE id = ?`, src).Scan(&srcMerged); err != nil {
+		return 0, mergeError("idea not found")
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT merged_into FROM ideas WHERE id = ?`, dst).Scan(&dstMerged); err != nil {
+		return 0, mergeError("pick an idea to merge into")
+	}
+	if srcMerged.Valid || dstMerged.Valid {
+		return 0, mergeError("one of those ideas was already merged")
+	}
+	res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO idea_votes (idea_id, contact_id, created_at)
+		SELECT ?, contact_id, created_at FROM idea_votes WHERE idea_id = ?`, dst, src)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	now := nowMs()
+	stmts := []struct {
+		q    string
+		args []any
+	}{
+		{`UPDATE idea_comments SET idea_id = ? WHERE idea_id = ? AND author_type <> 'system'`, []any{dst, src}},
+		{`UPDATE changelog_ideas SET idea_id = ? WHERE idea_id = ? AND NOT EXISTS (SELECT 1 FROM changelog_ideas x WHERE x.idea_id = ? AND x.entry_id = changelog_ideas.entry_id)`, []any{dst, src, dst}},
+		{`UPDATE ideas SET merged_into = ?, updated_at = ? WHERE id = ?`, []any{dst, now, src}},
+		{`UPDATE ideas SET merged_into = ? WHERE merged_into = ?`, []any{dst, src}}, // ideas merged into src follow it
+		{`UPDATE ideas SET updated_at = ? WHERE id = ?`, []any{now, dst}},
+	}
+	for _, st := range stmts {
+		if _, err := tx.ExecContext(ctx, st.q, st.args...); err != nil {
+			return 0, err
+		}
+	}
+	return int(n), tx.Commit()
+}
+
+// AddVoteFor records a vote on a customer's behalf (from a chat, say).
+func (s *Store) AddVoteFor(ctx context.Context, ideaID, contactID int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO idea_votes (idea_id, contact_id, created_at) VALUES (?, ?, ?)`, ideaID, contactID, nowMs())
+	return err
+}
+
+// IdeasForContact: ideas a customer has voted for (shown on their cases).
+func (s *Store) IdeasForContact(ctx context.Context, contactID int64) ([]*Idea, error) {
+	rows, err := s.db.QueryContext(ctx, ideaSelect+` WHERE i.merged_into IS NULL AND EXISTS (SELECT 1 FROM idea_votes v WHERE v.idea_id = i.id AND v.contact_id = ?) ORDER BY i.id DESC LIMIT 50`, contactID, contactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Idea{}
+	for rows.Next() {
+		it, err := scanIdea(rows, contactID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// ---------- who hears about an idea ----------
+
+type IdeaFollower struct {
+	ContactID int64
+	Name      string
+	Email     string
+	Token     string // unsubscribe token
+}
+
+// IdeaFollowers: voters and the author with an email who haven't opted out.
+// Each gets an unsubscribe token the first time they're emailed.
+func (s *Store) IdeaFollowers(ctx context.Context, ideaID int64) ([]IdeaFollower, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT k.id, k.name, k.email, COALESCE(k.notify_token, '') FROM contacts k
+		WHERE k.email <> '' AND k.feedback_optout = 0 AND (
+			EXISTS (SELECT 1 FROM idea_votes v WHERE v.idea_id = ? AND v.contact_id = k.id)
+			OR EXISTS (SELECT 1 FROM ideas i WHERE i.id = ? AND i.contact_id = k.id))
+		ORDER BY k.id LIMIT 5000`, ideaID, ideaID)
+	if err != nil {
+		return nil, err
+	}
+	out := []IdeaFollower{}
+	for rows.Next() {
+		var f IdeaFollower
+		if err := rows.Scan(&f.ContactID, &f.Name, &f.Email, &f.Token); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if out[i].Token == "" {
+			tok := newToken()
+			if _, err := s.db.ExecContext(ctx, `UPDATE contacts SET notify_token = ? WHERE id = ? AND notify_token IS NULL`, tok, out[i].ContactID); err != nil {
+				return nil, err
+			}
+			if err := s.db.QueryRowContext(ctx, `SELECT notify_token FROM contacts WHERE id = ?`, out[i].ContactID).Scan(&out[i].Token); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
+}
+
+// Unsubscribe turns off feedback emails for whoever holds token.
+func (s *Store) FeedbackUnsubscribe(ctx context.Context, token string) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE contacts SET feedback_optout = 1 WHERE notify_token = ?`, token)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ---------- changelog ----------
+
+type ChangelogEntry struct {
+	ID          int64   `json:"id"`
+	Title       string  `json:"title"`
+	Body        string  `json:"body"`
+	PublishedAt *int64  `json:"published_at"`
+	CreatedBy   *int64  `json:"created_by,omitempty"`
+	CreatedAt   int64   `json:"created_at"`
+	UpdatedAt   int64   `json:"updated_at"`
+	Ideas       []*Idea `json:"ideas"`
+}
+
+func (s *Store) ListChangelog(ctx context.Context, publishedOnly bool) ([]*ChangelogEntry, error) {
+	q := `SELECT id, title, body, published_at, created_by, created_at, updated_at FROM changelog`
+	if publishedOnly {
+		q += ` WHERE published_at IS NOT NULL ORDER BY published_at DESC`
+	} else {
+		q += ` ORDER BY published_at IS NOT NULL, COALESCE(published_at, updated_at) DESC`
+	}
+	rows, err := s.db.QueryContext(ctx, q+` LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	out := []*ChangelogEntry{}
+	for rows.Next() {
+		e := &ChangelogEntry{Ideas: []*Idea{}}
+		if err := rows.Scan(&e.ID, &e.Title, &e.Body, &e.PublishedAt, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, e := range out {
+		if e.Ideas, err = s.changelogIdeas(ctx, e.ID); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) GetChangelog(ctx context.Context, id int64) (*ChangelogEntry, error) {
+	e := &ChangelogEntry{}
+	err := s.db.QueryRowContext(ctx, `SELECT id, title, body, published_at, created_by, created_at, updated_at FROM changelog WHERE id = ?`, id).
+		Scan(&e.ID, &e.Title, &e.Body, &e.PublishedAt, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	e.Ideas, err = s.changelogIdeas(ctx, id)
+	return e, err
+}
+
+func (s *Store) changelogIdeas(ctx context.Context, entryID int64) ([]*Idea, error) {
+	rows, err := s.db.QueryContext(ctx, ideaSelect+` WHERE i.id IN (SELECT idea_id FROM changelog_ideas WHERE entry_id = ?) AND i.merged_into IS NULL ORDER BY i.id`, 0, entryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Idea{}
+	for rows.Next() {
+		it, err := scanIdea(rows, 0)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// SaveChangelog creates (id 0) or updates an entry and replaces its linked ideas.
+func (s *Store) SaveChangelog(ctx context.Context, id int64, title, body string, ideaIDs []int64, agentID int64) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	now := nowMs()
+	if id == 0 {
+		res, err := tx.ExecContext(ctx, `INSERT INTO changelog (title, body, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, title, body, agentID, now, now)
+		if err != nil {
+			return 0, err
+		}
+		id, _ = res.LastInsertId()
+	} else {
+		res, err := tx.ExecContext(ctx, `UPDATE changelog SET title = ?, body = ?, updated_at = ? WHERE id = ?`, title, body, now, id)
+		if err != nil {
+			return 0, err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return 0, errNotFound
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM changelog_ideas WHERE entry_id = ?`, id); err != nil {
+		return 0, err
+	}
+	for _, iid := range ideaIDs {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO changelog_ideas (entry_id, idea_id) SELECT ?, id FROM ideas WHERE id = ?`, id, iid); err != nil {
+			return 0, err
+		}
+	}
+	return id, tx.Commit()
+}
+
+// SetChangelogPublished publishes (or unpublishes) an entry. It reports
+// whether this is the first time it's ever been published, so the
+// announcement (ideas marked done, voters emailed) happens only once.
+func (s *Store) SetChangelogPublished(ctx context.Context, id int64, published bool) (bool, error) {
+	var at sql.NullInt64
+	var announced bool
+	if err := s.db.QueryRowContext(ctx, `SELECT published_at, announced FROM changelog WHERE id = ?`, id).Scan(&at, &announced); errors.Is(err, sql.ErrNoRows) {
+		return false, errNotFound
+	} else if err != nil {
+		return false, err
+	}
+	if published == at.Valid {
+		return false, nil
+	}
+	var v any
+	if published {
+		v = nowMs()
+	}
+	first := published && !announced
+	_, err := s.db.ExecContext(ctx, `UPDATE changelog SET published_at = ?, announced = announced OR ?, updated_at = ? WHERE id = ?`, v, first, nowMs(), id)
+	return first, err
+}
+
+func (s *Store) DeleteChangelog(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM changelog WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	return nil
 }

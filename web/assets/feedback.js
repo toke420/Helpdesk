@@ -118,6 +118,49 @@
   }
 
   // ---------- pages ----------
+  function nav(on) {
+    return h('nav', { class: 'pnav', 'aria-label': 'Feedback' },
+      [['ideas', 'Ideas', '#/'], ['roadmap', 'Roadmap', '#/roadmap'], ['changelog', 'What’s new', '#/changelog']].map(function (o) {
+        return h('a', { class: on === o[0] ? 'on' : null, href: o[2], 'aria-current': on === o[0] ? 'page' : null }, o[1]);
+      }));
+  }
+  function ideaCard(it) {
+    return h('a', { class: 'rcard', href: '#/idea/' + it.id },
+      h('span', { class: 'rv' }, h('span', { html: UP }), h('b', {}, it.votes)), h('span', { class: 't' }, it.title));
+  }
+  function renderRoadmap() {
+    show(nav('roadmap'), h('p', { class: 'muted' }, 'Loading…'));
+    req('GET', '/api/widget/ideas?status=roadmap&sort=top').then(function (d) {
+      var cols = [['planned', 'Planned', 'What we’re going to do next.'], ['in_progress', 'In progress', 'Being worked on now.'], ['complete', 'Done', 'Shipped — thanks for the ideas.']];
+      show(nav('roadmap'),
+        h('h1', {}, 'Roadmap'),
+        h('p', { class: 'lead' }, 'Where the most-wanted ideas stand. Vote on the board to move things up.'),
+        h('div', { class: 'roadmap' }, cols.map(function (c) {
+          var items = d.ideas.filter(function (x) { return x.status === c[0]; });
+          if (c[0] === 'complete') items = items.sort(function (a, b) { return b.status_at - a.status_at; }).slice(0, 20);
+          return h('section', { class: 'rcol ' + c[0] },
+            h('h2', {}, h('span', { class: 'chip ' + c[0] }, c[1]), h('span', { class: 'n' }, items.length)),
+            h('p', { class: 'muted small' }, c[2]),
+            items.length ? items.map(ideaCard) : h('p', { class: 'muted small' }, 'Nothing here yet.'));
+        })));
+    }).catch(fail);
+  }
+  function renderChangelog() {
+    show(nav('changelog'), h('p', { class: 'muted' }, 'Loading…'));
+    req('GET', '/api/widget/changelog').then(function (d) {
+      show(nav('changelog'),
+        h('h1', {}, 'What’s new'),
+        h('p', { class: 'lead' }, 'Recent improvements — many of them your ideas.'),
+        d.entries.length ? h('div', { class: 'log' }, d.entries.map(function (e) {
+          return h('article', { class: 'card entry' },
+            h('div', { class: 'muted small' }, new Date(e.published_at).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' })),
+            h('h2', {}, e.title),
+            e.body ? h('p', { class: 'body' }, e.body) : null,
+            e.ideas.length ? h('div', { class: 'delivers' }, h('span', { class: 'muted small' }, 'Ideas this delivers:'),
+              e.ideas.map(function (it) { return h('a', { class: 'dchip', href: '#/idea/' + it.id }, '✓ ' + it.title + ' · ' + it.votes + (it.votes === 1 ? ' vote' : ' votes')); })) : null);
+        })) : h('div', { class: 'empty' }, 'Nothing announced yet — check back soon.'));
+    }).catch(fail);
+  }
   function renderBoard() {
     var title = s.settings.feedback_title || 'Feedback & ideas';
     var tabs = h('div', { class: 'tabs', role: 'group', 'aria-label': 'Filter by status' },
@@ -136,7 +179,7 @@
           h('span', { class: 't' }, it.title),
           h('span', { class: 'meta' }, chip(it), [it.comments ? it.comments + (it.comments === 1 ? ' comment' : ' comments') : '', it.author_name, day(it.created_at)].filter(Boolean).join(' · ')))));
     });
-    show(
+    show(nav('ideas'),
       h('h1', {}, title),
       h('p', { class: 'lead' }, 'Tell us what would make things better, and vote for the ideas you want most.'),
       h('div', { class: 'bar' }, tabs, sort, h('a', { class: 'btn pri', href: '#/new' }, '+ Post an idea')),
@@ -169,6 +212,7 @@
   function renderIdea(id) {
     show(h('a', { class: 'back', href: '#/' }, '← All ideas'), h('p', { class: 'muted' }, 'Loading…'));
     req('GET', '/api/widget/ideas/' + id).then(function (d) {
+      if (d.merged_into) { location.replace('#/idea/' + d.merged_into); return; }
       var it = d.idea, draft = '';
       function draw(askWho) {
         var comments = h('div', { class: 'comments' });
@@ -211,6 +255,8 @@
     var m = location.hash.match(/^#\/idea\/(\d+)$/);
     if (m) return renderIdea(Number(m[1]));
     if (location.hash === '#/new') return renderNew();
+    if (location.hash === '#/roadmap') return renderRoadmap();
+    if (location.hash === '#/changelog') return renderChangelog();
     renderBoard();
   }
   window.addEventListener('hashchange', function () {

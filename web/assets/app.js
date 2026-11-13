@@ -26,6 +26,7 @@ const state = {
   myTasks: [],         // my open tasks (plus today's finished ones) — drives the Activities badge
   caseTasks: [],       // tasks linked to the open conversation
   ideaPending: 0,      // feedback ideas waiting for approval (sidebar badge)
+  caseIdeas: [],       // ideas the open conversation's customer voted for
 };
 
 // ---------- this device: presence + sound ----------
@@ -272,6 +273,7 @@ function parseRoute() {
   if (p[0] === 'settings') return { kind: 'settings' };
   if (p[0] === 'cases') return { kind: 'cases', params: new URLSearchParams(query) };
   if (p[0] === 'activities') return { kind: 'activities', params: new URLSearchParams(query) };
+  if (p[0] === 'feedback' && p[1] === 'changelog') return { kind: 'changelog', id: p[2] === 'new' ? 'new' : /^\d+$/.test(p[2] || '') ? Number(p[2]) : null };
   if (p[0] === 'feedback') return { kind: 'feedback', id: /^\d+$/.test(p[1] || '') ? Number(p[1]) : null, params: new URLSearchParams(query) };
   if (p[0] === 'knowledge') return { kind: 'knowledge', id: p[1] === 'new' ? 'new' : /^\d+$/.test(p[1] || '') ? Number(p[1]) : null };
   if (p[0] === 'view' && VIEWS.some(v => v[0] === p[1])) return { kind: 'view', view: p[1] };
@@ -300,6 +302,10 @@ async function route() {
   }
   if (r.kind === 'feedback') {
     if (r.id) renderIdea(r.id); else renderFeedback(r.params);
+    return;
+  }
+  if (r.kind === 'changelog') {
+    if (r.id) renderChangelogEditor(r.id); else renderChangelog();
     return;
   }
   if (!els.shell || !document.body.contains(els.shell) || inPage()) renderShell();
@@ -468,7 +474,7 @@ function renderSidebar() {
     activitiesNav(route.kind === 'activities'),
     h('a', { class: 'nav-item' + (route.kind === 'cases' ? ' active' : ''), href: '#/cases' }, 'All cases'),
     h('a', { class: 'nav-item' + (route.kind === 'knowledge' ? ' active' : ''), href: '#/knowledge' }, 'Knowledge'),
-    state.settings.feedback_enabled === '1' || state.ideaPending ? h('a', { class: 'nav-item' + (route.kind === 'feedback' ? ' active' : ''), href: '#/feedback' }, 'Feedback',
+    state.settings.feedback_enabled === '1' || state.ideaPending ? h('a', { class: 'nav-item' + (route.kind === 'feedback' || route.kind === 'changelog' ? ' active' : ''), href: '#/feedback' }, 'Feedback',
       state.ideaPending ? h('span', { class: 'count hot', title: `${state.ideaPending} waiting for approval` }, state.ideaPending) : null) : null,
     h('a', { class: 'nav-item' + (route.kind === 'settings' ? ' active' : ''), href: '#/settings' }, 'Settings'),
     h('div', { class: 'spacer' }),
@@ -600,6 +606,14 @@ async function openConversation(id) {
       api('GET', `/api/tasks?conversation=${id}`).catch(() => ({ tasks: [] })),
     ]);
     state.caseTasks = ct.tasks;
+    state.caseIdeas = [];
+    if (state.settings.feedback_enabled === '1') {
+      api('GET', `/api/conversations/${id}/ideas`).then(r => {
+        if (state.conv?.id !== id) return;
+        state.caseIdeas = r.ideas;
+        renderDetails();
+      }).catch(() => {});
+    }
     state.conv = data.conversation;
     state.messages = data.messages;
     state.history = data.history;
@@ -890,6 +904,7 @@ function renderDetails() {
     h('a', { class: 'small', href: `#/cases?contact=${c.id}`, style: 'display:inline-block;margin-top:8px' },
       state.history.length > 8 ? `See all ${state.history.length} cases →` : 'Open in case history →'),
     caseTasksPanel(conv),
+    state.settings.feedback_enabled === '1' ? caseIdeasPanel(conv) : null,
     state.ai?.enabled ? copilotPanel(conv) : null,
   ].filter(Boolean));
 }
@@ -1281,6 +1296,7 @@ async function renderFeedback(params) {
       h('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, menuButton(), h('h1', { style: 'flex:1' }, 'Feedback'),
         h('a', { class: 'btn', href: publicUrl, target: '_blank', rel: 'noopener' }, 'Open public board'),
         h('button', { class: 'btn primary', onclick: () => newIdeaDialog() }, '+ New idea')),
+      feedbackSwitch('ideas'),
       h('p', {}, 'Ideas customers post and vote on, from the chat widget and ', h('a', { href: publicUrl, target: '_blank', rel: 'noopener' }, publicUrl.replace(/^https?:\/\//, '')), '. Move them through the statuses — customers see every change.')),
     off ? h('div', { class: 'callout', style: 'margin-bottom:16px' }, 'The feedback board is switched off, so customers can\'t see it. An admin can turn it on in Settings → Feedback board.') : null,
     h('div', { class: 'cases-toolbar' },
@@ -1309,6 +1325,7 @@ function ideaRow(it) {
 
 function newIdeaDialog(prefill = {}) {
   const err = h('div', { class: 'error' });
+  const addVote = h('input', { type: 'checkbox', checked: true });
   const title = h('input', { class: 'input', maxlength: 120, value: prefill.title || '', required: true, placeholder: 'Short and specific, e.g. "Order tracking by SMS"' });
   const body = h('textarea', { class: 'input', rows: 5, maxlength: 5000, placeholder: 'What should it do, and why does it matter?' });
   body.value = prefill.body || '';
@@ -1319,17 +1336,18 @@ function newIdeaDialog(prefill = {}) {
       e.preventDefault();
       err.textContent = '';
       try {
-        const r = await api('POST', '/api/ideas', { title: title.value, body: body.value, status: status.value, source_case: prefill.source_case || null });
+        const r = await api('POST', '/api/ideas', { title: title.value, body: body.value, status: status.value, source_case: prefill.source_case || null, add_vote: !!prefill.source_case && addVote.checked });
         dlg.close();
         location.hash = `#/feedback/${r.idea.id}`;
       } catch (ex) { err.textContent = ex.message; }
     },
   },
-    h('div', { class: 't-dialog-h' }, h('h2', {}, 'New idea'),
+    h('div', { class: 't-dialog-h' }, h('h2', {}, prefill.source_case ? 'New idea from this chat' : 'New idea'),
       h('button', { type: 'button', class: 'btn ghost', 'aria-label': 'Close', onclick: () => dlg.close() }, '✕')),
     h('div', { class: 'field' }, h('span', {}, 'Title'), title),
     h('div', { class: 'field' }, h('span', {}, 'Details'), body),
     h('div', { class: 'field' }, h('span', {}, 'Status'), status),
+    prefill.source_case ? h('label', { class: 'check' }, addVote, ` Count ${prefill.customer || 'the customer'}'s vote (from case ${caseNo(prefill.source_case)})`) : null,
     err,
     h('div', { class: 't-dialog-f' }, h('button', { class: 'btn primary', type: 'submit' }, 'Add idea'),
       h('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Cancel')));
@@ -1352,8 +1370,29 @@ async function renderIdea(id) {
       try { await api('PATCH', `/api/ideas/${id}`, body); if (msg) toast(msg); await load(); }
       catch (ex) { toast(ex.message); }
     };
-    const statusSel = h('select', { class: 'input status-select', 'aria-label': 'Idea status', onchange: (e) => patch({ status: e.target.value }, 'Status updated — customers can see it') },
+    const statusSel = h('select', { class: 'input', 'aria-label': 'Idea status', onchange: () => syncStatus() },
       IDEA_STATUSES.map(([k, t]) => h('option', { value: k, selected: k === it.status }, t)));
+    const note = h('textarea', { class: 'input', rows: 2, maxlength: 3000, placeholder: 'Optional note — posted on the idea and included in the email', 'aria-label': 'Note with the status change' });
+    const mail = h('input', { type: 'checkbox', checked: true });
+    const canMail = r.email_enabled && r.emailable > 0 && it.approved;
+    const updateBtn = h('button', {
+      class: 'btn primary', disabled: true, onclick: async () => {
+        updateBtn.disabled = true;
+        try {
+          await api('PATCH', `/api/ideas/${id}`, { status: statusSel.value, note: note.value, notify: canMail && mail.checked });
+          toast(canMail && mail.checked ? `Status updated — emailing ${r.emailable} ${r.emailable === 1 ? 'person' : 'people'}` : 'Status updated — customers can see it');
+          await load();
+        } catch (ex) { toast(ex.message); updateBtn.disabled = false; }
+      },
+    }, 'Update status');
+    function syncStatus() { updateBtn.disabled = statusSel.value === it.status; }
+    const statusCard = h('section', { class: 'card' },
+      h('h2', {}, 'Status'),
+      h('div', { class: 'idea-status-row' }, statusSel, updateBtn),
+      note,
+      canMail ? h('label', { class: 'check' }, mail, ` Email ${r.emailable} ${r.emailable === 1 ? 'person' : 'people'} who voted or posted it`)
+        : h('p', { class: 'small muted', style: 'margin:6px 0 0' }, !r.email_enabled ? 'Email isn\'t set up on the server, so voters see changes on the board only.'
+          : !it.approved ? 'Approve it first — then voters can be emailed about changes.' : 'Nobody who voted left an email yet.'));
     const title = h('input', { class: 'input', value: it.title, maxlength: 120, 'aria-label': 'Title' });
     const body = h('textarea', { class: 'input', rows: 5, maxlength: 5000, 'aria-label': 'Details' });
     body.value = it.body;
@@ -1371,13 +1410,15 @@ async function renderIdea(id) {
             h('h1', { style: 'margin:0 0 4px' }, it.title),
             h('div', { class: 'small muted' }, author, ' · ', shortDate(it.created_at),
               it.source_case ? h('span', {}, ' · from case ', h('a', { href: `#/c/${it.source_case}` }, caseNo(it.source_case))) : null)),
-          h('div', { class: 'idea-actions' }, statusSel))),
+          h('div', { class: 'idea-actions' }, h('button', { class: 'btn', onclick: () => mergeDialog(it) }, 'Merge into…')))),
+      it.merged_into ? h('div', { class: 'callout', style: 'margin-bottom:16px' }, 'This idea was merged into ', h('a', { href: `#/feedback/${it.merged_into}` }, `idea #${it.merged_into}`), '. Its votes and comments moved there.') : null,
       !it.approved ? h('div', { class: 'callout idea-approve' },
         h('span', {}, 'Only the customer who posted this can see it until it\'s approved.'),
         h('button', { class: 'btn primary', onclick: () => patch({ approved: true }, 'Approved — it\'s on the board') }, 'Approve'),
         h('button', { class: 'btn', onclick: () => delIdea() }, 'Delete')) : null,
       h('div', { class: 'idea-grid' },
         h('div', {},
+          it.merged_into ? null : statusCard,
           h('section', { class: 'card' },
             h('h2', {}, 'Idea'),
             h('label', { class: 'field' }, 'Title', title),
@@ -1431,6 +1472,206 @@ async function renderIdea(id) {
   await load();
 }
 
+// ---------- feedback: phase 2 (changelog, merge, chat → idea) ----------
+function feedbackSwitch(on) {
+  return h('div', { class: 'seg', role: 'group', 'aria-label': 'Feedback section', style: 'margin:4px 0 14px' },
+    h('a', { class: 'seg-btn' + (on === 'ideas' ? ' on' : ''), href: '#/feedback', 'aria-current': on === 'ideas' ? 'page' : null }, 'Ideas'),
+    h('a', { class: 'seg-btn' + (on === 'changelog' ? ' on' : ''), href: '#/feedback/changelog', 'aria-current': on === 'changelog' ? 'page' : null }, 'Changelog'));
+}
+
+// ideaPicker: search ideas and pick one. onPick(idea) runs on click.
+function ideaPicker(onPick, { exclude = 0, actionLabel = 'Pick' } = {}) {
+  const list = h('div', { class: 'idea-pick-list' });
+  let timer, seq = 0;
+  async function load(q) {
+    const my = ++seq;
+    try {
+      const r = await api('GET', '/api/ideas?status=active&sort=top' + (q ? '&q=' + encodeURIComponent(q) : ''));
+      if (my !== seq) return;
+      const ideas = r.ideas.filter(x => x.id !== exclude);
+      fill(list, ideas.length ? ideas.slice(0, 30).map(x => h('div', { class: 'idea-pick' },
+        h('span', { class: 'idea-votes sm' }, h('b', {}, x.votes)),
+        h('span', { class: 'kb-main' }, h('span', { class: 'c-title' }, x.title), h('span', { class: 'c-preview' }, ideaLabel(x.status))),
+        h('button', { class: 'btn sm', type: 'button', onclick: () => onPick(x) }, actionLabel)))
+        : h('p', { class: 'small muted' }, q ? 'No ideas match.' : 'No ideas yet.'));
+    } catch (ex) { fill(list, h('p', { class: 'error' }, ex.message)); }
+  }
+  const input = h('input', { class: 'input', type: 'search', placeholder: 'Search ideas…', 'aria-label': 'Search ideas',
+    oninput: (e) => { clearTimeout(timer); timer = setTimeout(() => load(e.target.value.trim()), 200); } });
+  load('');
+  return { el: h('div', { class: 'idea-picker' }, input, list), focus: () => input.focus() };
+}
+
+function simpleDialog(title, ...body) {
+  const dlg = h('dialog', { class: 't-dialog' });
+  dlg.append(h('form', { method: 'dialog', onsubmit: (e) => e.preventDefault() },
+    h('div', { class: 't-dialog-h' }, h('h2', {}, title),
+      h('button', { type: 'button', class: 'btn ghost', 'aria-label': 'Close', onclick: () => dlg.close() }, '✕')),
+    ...body));
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  return dlg;
+}
+
+function mergeDialog(it) {
+  let dlg;
+  const picker = ideaPicker(async (target) => {
+    if (!confirm(`Merge “${it.title}” into “${target.title}”?\n\nVotes and comments move across, and this idea leaves the board. This can't be undone.`)) return;
+    try {
+      const r = await api('POST', `/api/ideas/${it.id}/merge`, { into: target.id });
+      dlg.close();
+      toast(`Merged — ${r.votes_added} new vote${r.votes_added === 1 ? '' : 's'} added`);
+      location.hash = `#/feedback/${target.id}`;
+    } catch (ex) { toast(ex.message); }
+  }, { exclude: it.id, actionLabel: 'Merge here' });
+  dlg = simpleDialog('Merge into another idea',
+    h('p', { class: 'small muted', style: 'margin:0 0 10px' }, `Use this when “${clipText(it.title, 60)}” is a duplicate. Pick the idea to keep.`),
+    picker.el);
+  picker.focus();
+}
+
+function caseIdeasPanel(conv) {
+  const ideas = state.caseIdeas || [];
+  return h('div', {},
+    h('h3', {}, ideas.length ? `Ideas they voted for (${ideas.length})` : 'Feedback'),
+    ideas.length ? h('div', { class: 'case-ideas' }, ideas.slice(0, 6).map(x => h('a', { class: 'case-idea', href: `#/feedback/${x.id}` },
+      h('span', { class: 'idea-votes sm' }, h('b', {}, x.votes)),
+      h('span', { class: 'kb-main' }, h('span', { class: 'c-title' }, x.title), h('span', { class: 'c-preview' }, ideaLabel(x.status))))))
+      : h('p', { class: 'small faint', style: 'margin:0 0 6px' }, 'Asking for a feature? Add their vote to an idea.'),
+    h('button', { class: 'btn sm', onclick: () => linkIdeaDialog(conv) }, '+ Add to an idea'));
+}
+
+function linkIdeaDialog(conv) {
+  let dlg;
+  const who = contactName(conv.contact);
+  const picker = ideaPicker(async (x) => {
+    try {
+      await api('POST', `/api/ideas/${x.id}/votes`, { conversation_id: conv.id });
+      dlg.close();
+      toast(`Added ${who}'s vote to “${clipText(x.title, 40)}”`);
+      const r = await api('GET', `/api/conversations/${conv.id}/ideas`);
+      if (state.conv?.id === conv.id) { state.caseIdeas = r.ideas; renderDetails(); }
+    } catch (ex) { toast(ex.message); }
+  }, { actionLabel: 'Add vote' });
+  const fromChat = state.messages.filter(m => m.author_type === 'contact' && !m.is_note).map(m => m.body).join('\n\n');
+  dlg = simpleDialog(`Add ${who}'s vote to an idea`,
+    picker.el,
+    h('div', { class: 'idea-pick-new' },
+      h('span', { class: 'small muted' }, 'Not on the board yet?'),
+      h('button', {
+        class: 'btn', type: 'button', onclick: () => {
+          dlg.close();
+          newIdeaDialog({ title: clipText(conv.subject || '', 120), body: clipText(fromChat, 5000), source_case: conv.id, customer: who });
+        },
+      }, 'New idea from this chat')));
+  picker.focus();
+}
+
+async function renderChangelog() {
+  const main = enterPage('cases feedback');
+  const list = h('div', {});
+  ideaPageReload = null;
+  fill(main,
+    h('div', { class: 'cases-top' },
+      h('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, menuButton(), h('h1', { style: 'flex:1' }, 'Feedback'),
+        h('a', { class: 'btn', href: `${state.baseUrl}/feedback#/changelog`, target: '_blank', rel: 'noopener' }, 'Open public changelog'),
+        h('a', { class: 'btn primary', href: '#/feedback/changelog/new' }, '+ New post')),
+      feedbackSwitch('changelog'),
+      h('p', {}, 'Tell customers what\'s new. Link the ideas a post delivers: publishing marks them Complete and emails everyone who voted.')),
+    list);
+  try {
+    const r = await api('GET', '/api/changelog');
+    if (!r.entries.length) {
+      fill(list, h('div', { class: 'empty' }, h('strong', {}, 'No posts yet'), 'Write your first “What\'s new” post when something ships.'));
+      return;
+    }
+    fill(list, h('div', { class: 'case-table' }, r.entries.map(e => h('a', { class: 'kb-row', href: `#/feedback/changelog/${e.id}` },
+      h('span', { class: 'kb-main' }, h('span', { class: 'c-title' }, e.title),
+        h('span', { class: 'c-preview' }, e.ideas.length ? `Delivers ${e.ideas.length} idea${e.ideas.length === 1 ? '' : 's'}: ${e.ideas.map(x => x.title).join(', ')}` : clipText(e.body, 120))),
+      h('span', {}, e.published_at ? h('span', { class: 'pill idea-complete' }, 'Published') : h('span', { class: 'pill' }, 'Draft')),
+      h('span', { class: 'c-opened' }, e.published_at ? shortDate(e.published_at) : `Edited ${shortDate(e.updated_at)}`)))));
+  } catch (ex) { fill(list, h('div', { class: 'empty' }, ex.message)); }
+}
+
+async function renderChangelogEditor(id) {
+  const main = enterPage('cases feedback');
+  ideaPageReload = null;
+  let e = { title: '', body: '', ideas: [], published_at: null };
+  if (id !== 'new') {
+    try { e = (await api('GET', `/api/changelog/${id}`)).entry; }
+    catch (ex) { toast(ex.message); location.hash = '#/feedback/changelog'; return; }
+  }
+  let linked = e.ideas.slice();
+  const err = h('div', { class: 'error' });
+  const title = h('input', { class: 'input', value: e.title, maxlength: 120, placeholder: 'e.g. Gift wrapping is here', 'aria-label': 'Title' });
+  const body = h('textarea', { class: 'input kb-body', rows: 10, maxlength: 10000, placeholder: 'What changed, and how to use it.', 'aria-label': 'Post' });
+  body.value = e.body;
+  const chips = h('div', { class: 'cl-ideas' });
+  function drawChips() {
+    fill(chips, linked.length ? linked.map(x => h('span', { class: 'cl-chip' }, ideaPill(x.status), ' ', x.title, ` · ${x.votes} vote${x.votes === 1 ? '' : 's'}`,
+      h('button', { type: 'button', class: 'btn ghost sm', 'aria-label': `Unlink ${x.title}`, onclick: () => { linked = linked.filter(y => y.id !== x.id); drawChips(); } }, '✕')))
+      : h('p', { class: 'small muted', style: 'margin:0' }, 'No ideas linked.'));
+  }
+  drawChips();
+  const save = async () => {
+    err.textContent = '';
+    const payload = { title: title.value, body: body.value, idea_ids: linked.map(x => x.id) };
+    const r = id === 'new' ? await api('POST', '/api/changelog', payload) : await api('PUT', `/api/changelog/${id}`, payload);
+    return r.entry;
+  };
+  const notify = h('input', { type: 'checkbox', checked: true });
+  const published = !!e.published_at;
+  fill(main,
+    h('div', { class: 'cases-top' },
+      h('a', { class: 'small', href: '#/feedback/changelog' }, '← Changelog'),
+      h('h1', { style: 'margin:8px 0 0' }, id === 'new' ? 'New post' : published ? 'Published post' : 'Draft post')),
+    h('section', { class: 'card', style: 'max-width:820px' },
+      h('label', { class: 'field' }, 'Title', title),
+      h('label', { class: 'field' }, 'Post', body),
+      h('div', { class: 'field' }, h('span', {}, 'Ideas this delivers'), chips,
+        h('button', {
+          class: 'btn sm', type: 'button', style: 'justify-self:start;margin-top:6px', onclick: () => {
+            let dlg;
+            const picker = ideaPicker((x) => { if (!linked.some(y => y.id === x.id)) linked.push(x); drawChips(); dlg.close(); }, { actionLabel: 'Link' });
+            dlg = simpleDialog('Link an idea', picker.el);
+            picker.focus();
+          },
+        }, '+ Link an idea')),
+      !published ? h('label', { class: 'check' }, notify, ' When published, email everyone who voted for the linked ideas') : null,
+      err,
+      h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+        h('button', {
+          class: 'btn' + (published ? ' primary' : ''), onclick: async () => {
+            try { const s = await save(); toast('Saved'); if (id === 'new') location.hash = `#/feedback/changelog/${s.id}`; else renderChangelogEditor(id); }
+            catch (ex) { err.textContent = ex.message; }
+          },
+        }, published ? 'Save changes' : 'Save draft'),
+        !published ? h('button', {
+          class: 'btn primary', onclick: async () => {
+            if (linked.length && !confirm(`Publish now? ${linked.length} linked idea${linked.length === 1 ? '' : 's'} will be marked Complete${notify.checked ? ' and voters emailed' : ''}.`)) return;
+            try {
+              const s = await save();
+              await api('POST', `/api/changelog/${s.id}/publish`, { published: true, notify: notify.checked });
+              toast('Published');
+              location.hash = '#/feedback/changelog';
+            } catch (ex) { err.textContent = ex.message; }
+          },
+        }, 'Publish') : h('button', {
+          class: 'btn', onclick: async () => {
+            try { await api('POST', `/api/changelog/${id}/publish`, { published: false }); toast('Unpublished — back to draft'); renderChangelogEditor(id); }
+            catch (ex) { toast(ex.message); }
+          },
+        }, 'Unpublish'),
+        id !== 'new' ? h('button', {
+          class: 'btn danger', onclick: async () => {
+            if (!confirm('Delete this post?')) return;
+            try { await api('DELETE', `/api/changelog/${id}`); toast('Deleted'); location.hash = '#/feedback/changelog'; } catch (ex) { toast(ex.message); }
+          },
+        }, 'Delete') : null)));
+  if (id === 'new') title.focus();
+}
+
 function feedbackCard() {
   const s = state.settings;
   const err = h('div', { class: 'error' });
@@ -1440,7 +1681,7 @@ function feedbackCard() {
   const url = `${state.baseUrl}/feedback`;
   return h('section', { class: 'card' },
     h('h2', {}, 'Feedback board'),
-    h('p', {}, 'Customers post ideas and vote from the chat widget (Ideas button) and the public page ', h('a', { href: url, target: '_blank', rel: 'noopener' }, url), '. Voting takes one tap; posting and commenting ask for a name and email.'),
+    h('p', {}, 'Customers post ideas and vote from the chat widget (Ideas button) and the public page ', h('a', { href: url, target: '_blank', rel: 'noopener' }, url), ', which also has your roadmap and changelog. Voting takes one tap; posting and commenting ask for a name and email.'),
     h('label', { class: 'check' }, on, ' Show the feedback board to customers'),
     h('label', { class: 'check' }, approval, ' New customer ideas wait for an agent to approve them'),
     h('label', { class: 'field' }, 'Board title', title),

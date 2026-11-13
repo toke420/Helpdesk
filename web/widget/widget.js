@@ -20,9 +20,9 @@
     settings: { brand_name: 'Support', accent_color: '#2f6fed', greeting: '', offline_message: '', online: false },
     contact: { name: '', email: '' },
     cases: [],          // this visitor's cases, newest first
-    view: 'chat',       // 'chat' | 'list' | 'ideas' | 'idea' | 'newidea'
+    view: 'chat',       // 'chat' | 'list' | 'ideas' | 'idea' | 'newidea' | 'news'
     // Feedback board (when s.settings.feedback is on).
-    fb: { ideas: [], loaded: false, status: 'active', sort: 'top', idea: null, comments: [], err: '', busy: false, title: '', body: '', comment: '', askWho: false },
+    fb: { ideas: [], loaded: false, status: 'active', sort: 'top', idea: null, comments: [], err: '', busy: false, title: '', body: '', comment: '', askWho: false, news: null },
     current: null,      // the case shown in chat view; null = a new, unsent conversation
     messages: [],
     unseen: {},         // case id -> true when an agent replied while it wasn't on screen
@@ -249,7 +249,40 @@
   }
 
   // ---------- feedback board ----------
-  function isBoard() { return s.view === 'ideas' || s.view === 'idea' || s.view === 'newidea'; }
+  function isBoard() { return s.view === 'ideas' || s.view === 'idea' || s.view === 'newidea' || s.view === 'news'; }
+  function openNews() {
+    s.view = 'news';
+    render();
+    req('GET', '/api/widget/changelog').then(function (d) { s.fb.news = d.entries; if (s.view === 'news') render(); })
+      .catch(function (e) { flash(e.message); });
+  }
+  function boardSwitch(on) {
+    var sw = el('div', 'bsw');
+    [['ideas', 'Ideas', openBoard], ['news', 'What’s new', openNews]].forEach(function (o) {
+      var b = btn(on === o[0] ? 'on' : '', o[1], o[2]);
+      b.setAttribute('aria-pressed', on === o[0] ? 'true' : 'false');
+      sw.append(b);
+    });
+    return sw;
+  }
+  function renderNews() {
+    var b = ui.body;
+    b.textContent = '';
+    b.append(boardSwitch('news'));
+    if (!s.fb.news) { b.append(el('div', 'empty', 'Loading…')); return; }
+    if (!s.fb.news.length) b.append(el('div', 'empty', 'Nothing announced yet — check back soon.'));
+    s.fb.news.forEach(function (e) {
+      var card = el('div', 'news');
+      card.append(el('div', 'nd', day(e.published_at)), el('div', 'nt', e.title));
+      if (e.body) card.append(el('div', 'ibody', e.body));
+      e.ideas.forEach(function (it) {
+        var l = btn('nidea', '✓ ' + it.title, function () { openIdea(it.id); });
+        card.append(l);
+      });
+      b.append(card);
+    });
+    b.scrollTop = 0;
+  }
   function ensureToken() { return s.token ? Promise.resolve() : session(true); }
   function loadIdeas() {
     var q = '?status=' + encodeURIComponent(s.fb.status) + '&sort=' + encodeURIComponent(s.fb.sort);
@@ -268,6 +301,7 @@
     if (!s.fb.idea || s.fb.idea.id !== id) { s.fb.idea = null; s.fb.comments = []; s.fb.comment = ''; }
     render();
     return req('GET', '/api/widget/ideas/' + id).then(function (d) {
+      if (d.merged_into) return openIdea(d.merged_into);
       s.fb.idea = d.idea; s.fb.comments = d.comments;
       if (s.view === 'idea') render();
     }).catch(function (e) { flash(e.message); openBoard(); });
@@ -355,6 +389,7 @@
   function renderIdeas() {
     var b = ui.body;
     b.textContent = '';
+    b.append(boardSwitch('ideas'));
     var add = iconButton('newbtn', ICON_PLUS, 'Post an idea', 'Post an idea');
     add.onclick = function () { s.view = 'newidea'; s.fb.err = ''; s.fb.askWho = false; render(); };
     var bar = el('div', 'fbbar');
@@ -547,6 +582,13 @@
     '@keyframes hdblink{0%,80%,100%{opacity:.25}40%{opacity:1}}',
     '.flash{position:absolute;left:12px;right:12px;bottom:76px;background:var(--text);color:var(--bg);padding:8px 12px;border-radius:10px;font-size:13px}',
     '.fbbar{display:flex;gap:4px;align-items:center;flex-wrap:wrap}',
+    '.bsw{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;background:var(--sunken);border-radius:12px}',
+    '.bsw button{height:34px;border:0;border-radius:9px;background:transparent;color:var(--muted);font-weight:650;cursor:pointer}',
+    '.bsw button.on{background:var(--bg);color:var(--text);box-shadow:0 1px 2px rgba(16,24,40,.12)}',
+    '.news{border:1px solid var(--line2);border-radius:12px;padding:12px 14px;display:grid;gap:6px}',
+    '.news .nd{font-size:12px;color:var(--muted)}',
+    '.news .nt{font-weight:650;font-size:15px}',
+    '.nidea{justify-self:start;border:0;background:var(--ok-bg);color:var(--ok);border-radius:999px;padding:3px 10px;font-size:12.5px;font-weight:650;cursor:pointer;text-align:left}',
     '.fbbar .tab{height:30px;padding:0 10px;border:0;border-radius:8px;background:var(--sunken);color:var(--muted);font-size:12.5px;font-weight:600;cursor:pointer}',
     '.fbbar .tab.on{background:var(--a);color:#fff}',
     '.fbbar .sort{margin-left:auto;height:30px;border:1px solid var(--line2);border-radius:8px;background:var(--field);color:var(--text);font:inherit;font-size:12.5px;padding:0 6px}',
@@ -635,7 +677,7 @@
   var head = el('div', 'head');
   ui.back = iconButton('hb', ICON_BACK, 'Back');
   ui.back.onclick = function () {
-    if (s.view === 'idea' || s.view === 'newidea') { s.fb.askWho = false; openBoard(); return; }
+    if (s.view === 'idea' || s.view === 'newidea' || s.view === 'news') { s.fb.askWho = false; openBoard(); return; }
     if (s.current || s.messages.length) { s.view = 'chat'; render(); } else newConversation();
   };
   ui.logo = el('div', 'logo');
@@ -810,6 +852,7 @@
     if (s.view === 'ideas') renderIdeas();
     else if (s.view === 'idea') renderIdea();
     else if (s.view === 'newidea') renderNewIdea();
+    else if (s.view === 'news') renderNews();
     else if (list) renderList(); else renderChat();
   }
 

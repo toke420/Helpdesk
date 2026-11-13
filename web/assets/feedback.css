@@ -89,6 +89,30 @@ textarea { resize: vertical; }
 .c .who b { color: var(--text); }
 .c .txt { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
 .sys { text-align: center; font-size: 13px; color: var(--muted); }
+.pnav { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: -8px 0 22px; overflow-x: auto; }
+.pnav a { padding: 10px 14px; text-decoration: none; color: var(--muted); font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.pnav a:hover { color: var(--text); }
+.pnav a.on { color: var(--text); border-bottom-color: var(--a); }
+.small { font-size: 13px; }
+.roadmap { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.rcol { background: var(--sunken); border-radius: 14px; padding: 12px; display: grid; gap: 8px; }
+.rcol h2 { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.rcol h2 .n { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.rcol > p { margin: 0 0 4px; }
+.rcard { display: flex; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; text-decoration: none; }
+.rcard:hover { border-color: var(--a); }
+.rcard .rv { display: flex; flex-direction: column; align-items: center; min-width: 30px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rcard .rv svg { width: 12px; height: 12px; }
+.rcard .t { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.log { display: grid; gap: 14px; }
+.entry h2 { font-size: 20px; }
+.entry .body { margin: 0; }
+.delivers { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.dchip { font-size: 13px; text-decoration: none; background: var(--good-soft); color: var(--good); border-radius: 999px; padding: 3px 10px; font-weight: 600; }
+.dchip:hover { text-decoration: underline; }
+@media (max-width: 760px) {
+  .roadmap { grid-template-columns: 1fr; }
+}
 .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-weight: 550; max-width: calc(100vw - 32px); }
 .toast[hidden] { display: none; }
 @media (max-width: 640px) {

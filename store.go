@@ -224,6 +224,30 @@ var migrations = [][]string{
 		)`,
 		`CREATE INDEX idea_comments_idea ON idea_comments(idea_id, id)`,
 	},
+	// 10: changelog, and email preferences for feedback updates.
+	{
+		`CREATE TABLE changelog (
+			id INTEGER PRIMARY KEY,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL DEFAULT '',
+			published_at INTEGER,
+			announced INTEGER NOT NULL DEFAULT 0, -- linked ideas marked done + voters emailed (once)
+			created_by INTEGER REFERENCES agents(id) ON DELETE SET NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX changelog_published ON changelog(published_at)`,
+		`CREATE TABLE changelog_ideas (
+			entry_id INTEGER NOT NULL REFERENCES changelog(id) ON DELETE CASCADE,
+			idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+			PRIMARY KEY (entry_id, idea_id)
+		) WITHOUT ROWID`,
+		`CREATE INDEX changelog_ideas_idea ON changelog_ideas(idea_id)`,
+		// Feedback emails: opted out, and the token in their unsubscribe link.
+		`ALTER TABLE contacts ADD COLUMN feedback_optout INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE contacts ADD COLUMN notify_token TEXT`,
+		`CREATE UNIQUE INDEX contacts_notify_token ON contacts(notify_token) WHERE notify_token IS NOT NULL`,
+	},
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

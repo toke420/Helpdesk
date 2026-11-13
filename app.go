@@ -78,6 +78,7 @@ func (a *App) Routes() http.Handler {
 	wm.HandleFunc("POST /api/widget/ideas", a.visitor(a.widgetCreateIdea))
 	wm.HandleFunc("POST /api/widget/ideas/{id}/vote", a.visitor(a.widgetVote))
 	wm.HandleFunc("POST /api/widget/ideas/{id}/comments", a.visitor(a.widgetIdeaComment))
+	wm.HandleFunc("GET /api/widget/changelog", a.optionalVisitor(a.widgetChangelog))
 	mux.Handle("/api/widget/", a.widgetCORS(wm))
 
 	// --- agent API (same-origin, cookie session) ---
@@ -117,6 +118,15 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/ideas/{id}", a.agent(a.deleteIdea))
 	mux.HandleFunc("POST /api/ideas/{id}/comments", a.agent(a.agentIdeaComment))
 	mux.HandleFunc("DELETE /api/ideas/{id}/comments/{cid}", a.agent(a.deleteIdeaComment))
+	mux.HandleFunc("POST /api/ideas/{id}/merge", a.agent(a.mergeIdea))
+	mux.HandleFunc("POST /api/ideas/{id}/votes", a.agent(a.voteFor))
+	mux.HandleFunc("GET /api/conversations/{id}/ideas", a.agent(a.caseIdeas))
+	mux.HandleFunc("GET /api/changelog", a.agent(a.listChangelog))
+	mux.HandleFunc("POST /api/changelog", a.agent(a.saveChangelog))
+	mux.HandleFunc("GET /api/changelog/{id}", a.agent(a.getChangelog))
+	mux.HandleFunc("PUT /api/changelog/{id}", a.agent(a.saveChangelog))
+	mux.HandleFunc("POST /api/changelog/{id}/publish", a.agent(a.publishChangelog))
+	mux.HandleFunc("DELETE /api/changelog/{id}", a.agent(a.deleteChangelog))
 	mux.HandleFunc("GET /api/agents", a.agent(a.listAgents))
 	mux.HandleFunc("POST /api/agents", a.admin(a.createAgent))
 	mux.HandleFunc("PATCH /api/agents/{id}", a.admin(a.updateAgent))
@@ -141,6 +151,7 @@ func (a *App) Routes() http.Handler {
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFileFS(w, r, sub, "feedback.html")
 	})
+	mux.HandleFunc("GET /feedback/unsubscribe", a.feedbackUnsubscribe)
 	mux.HandleFunc("GET /demo", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, sub, "widget/demo.html")
 	})

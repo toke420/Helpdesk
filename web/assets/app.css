@@ -512,6 +512,23 @@ label.check input { width: 16px; height: 16px; }
   .idea-tags { grid-column: 2; }
 }
 
+.idea-status-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.idea-status-row select { flex: 1; }
+.idea-votes.sm { width: 38px; height: 38px; flex: none; }
+.idea-votes.sm b { font-size: 13px; }
+.idea-picker { display: grid; gap: 10px; }
+.idea-pick-list { display: grid; gap: 4px; max-height: 50vh; overflow-y: auto; }
+.idea-pick { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-radius: 8px; }
+.idea-pick:hover { background: var(--sunken); }
+.idea-pick-new { display: flex; align-items: center; gap: 10px; justify-content: space-between; border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.case-ideas { display: grid; gap: 4px; margin-bottom: 8px; }
+.case-idea { display: flex; gap: 8px; align-items: center; padding: 4px; border-radius: 8px; text-decoration: none; color: var(--text); }
+.case-idea:hover { background: var(--sunken); }
+.cl-ideas { display: grid; gap: 6px; }
+.cl-chip { display: flex; align-items: center; gap: 4px; font-size: 13px; border: 1px solid var(--line); border-radius: 10px; padding: 4px 4px 4px 8px; }
+.cl-chip .btn { margin-left: auto; }
+a.seg-btn { display: inline-flex; align-items: center; text-decoration: none; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1240px) {
   .shell.with-details { grid-template-columns: 232px 320px 1fr; }
