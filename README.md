@@ -8,6 +8,7 @@ A small, self-hosted live-chat help desk in the spirit of Intercom: a chat bubbl
 - **Works on phones** — below 860px wide the sidebar becomes a slide-out menu (☰ at the top left, with a red dot when there are unread chats or tasks due). Tap outside it, swipe it left, press ✕ or pick a page to close it.
 - **Shared inbox** — Open / Assigned to me / Unassigned / Pending / Closed views, live updates, unread markers, assignment (a first reply auto-assigns), internal notes customers never see, an activity trail of status and assignment changes, customer details and past conversations.
 - **Case history** — every chat is a numbered case. **All cases** (agents) searches by case number, subject, customer or any message text; filters by status, agent, category and date; groups by month opened, customer, category or status; and shows totals and average time to close. Filters live in the URL, so Back from a case returns to the same view. Customers get **Your cases** in the widget: open and closed cases listed separately, full transcripts of past cases, more than one case open at once, and a "new reply" marker.
+- **Feedback board** — customers post ideas and vote on them, from an **Ideas** button in the chat widget and a public page at `/feedback` (same board in both). Voting is one tap (one vote per browser); posting and commenting ask for a name and email. Ideas move through Open → Under review → Planned → In progress → Complete (or Closed), and every status change shows on the idea for customers to see. Agents get a **Feedback** page: sort by votes, an approval queue for new customer ideas (optional, Settings → Feedback board), replies, and each idea's voters with their email and cases. Names on the public board are shortened ("Jane S."); emails are never shown.
 - **Categories** — admins edit the list in Settings (defaults: Account & access, Hardware, Network & VPN, Software, Email, Other); agents set one per case.
 - **AI** (optional, needs a model — see below):
   - **Copilot** for agents: *Draft reply* writes the next reply from your Knowledge articles and similar resolved cases, and lists which ones it used; *Improve* tidies the agent's own draft without changing its meaning; *Summarize case* gives a 2–4 line handover; *Turn into article* drafts a Knowledge article from a closed case, with personal details stripped.
@@ -116,6 +117,8 @@ If you bind-mount a host folder instead of the named volume, make it writable by
 | `hub.go` | In-memory pub/sub + Server-Sent Events |
 | `ai.go` / `api_ai.go` / `store_ai.go` | Model client (Claude + OpenAI-compatible), prompts, Copilot, AI agent, Knowledge, keyword search (SQLite FTS5) |
 | `api_tasks.go` / `store_tasks.go` | Activities: tasks, ordering, permissions |
+| `api_feedback.go` / `store_feedback.go` | Feedback board: ideas, votes, comments, approval |
+| `web/feedback.html`, `web/assets/feedback.*` | Public feedback board page (`/feedback`) |
 | `mail.go` | SMTP notifications |
 | `auth.go` | Password hashing, tokens, rate limiter |
 | `web/` | Inbox app (`index.html`, `assets/`) and widget (`widget/`), embedded into the binary |

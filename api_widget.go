@@ -12,6 +12,8 @@ type widgetSettings struct {
 	Greeting       string `json:"greeting"`
 	OfflineMessage string `json:"offline_message"`
 	Online         bool   `json:"online"`
+	Feedback       bool   `json:"feedback"`
+	FeedbackTitle  string `json:"feedback_title"`
 }
 
 func (a *App) publicSettings(r *http.Request) (widgetSettings, error) {
@@ -22,7 +24,8 @@ func (a *App) publicSettings(r *http.Request) (widgetSettings, error) {
 	return widgetSettings{
 		BrandName: s["brand_name"], AccentColor: s["accent_color"],
 		Greeting: s["greeting"], OfflineMessage: s["offline_message"],
-		Online: a.pres.anyAvailable(),
+		Online:   a.pres.anyAvailable(),
+		Feedback: s["feedback_enabled"] == "1", FeedbackTitle: s["feedback_title"],
 	}, nil
 }
 

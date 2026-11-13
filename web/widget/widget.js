@@ -20,7 +20,9 @@
     settings: { brand_name: 'Support', accent_color: '#2f6fed', greeting: '', offline_message: '', online: false },
     contact: { name: '', email: '' },
     cases: [],          // this visitor's cases, newest first
-    view: 'chat',       // 'chat' | 'list'
+    view: 'chat',       // 'chat' | 'list' | 'ideas' | 'idea' | 'newidea'
+    // Feedback board (when s.settings.feedback is on).
+    fb: { ideas: [], loaded: false, status: 'active', sort: 'top', idea: null, comments: [], err: '', busy: false, title: '', body: '', comment: '', askWho: false },
     current: null,      // the case shown in chat view; null = a new, unsent conversation
     messages: [],
     unseen: {},         // case id -> true when an agent replied while it wasn't on screen
@@ -246,6 +248,199 @@
     });
   }
 
+  // ---------- feedback board ----------
+  function isBoard() { return s.view === 'ideas' || s.view === 'idea' || s.view === 'newidea'; }
+  function ensureToken() { return s.token ? Promise.resolve() : session(true); }
+  function loadIdeas() {
+    var q = '?status=' + encodeURIComponent(s.fb.status) + '&sort=' + encodeURIComponent(s.fb.sort);
+    return req('GET', '/api/widget/ideas' + q).then(function (d) {
+      s.fb.ideas = d.ideas; s.fb.loaded = true;
+      if (s.view === 'ideas') render();
+    });
+  }
+  function openBoard() {
+    s.view = 'ideas'; s.fb.err = '';
+    render();
+    loadIdeas().catch(function (e) { flash(e.message); });
+  }
+  function openIdea(id) {
+    s.view = 'idea'; s.fb.err = ''; s.fb.askWho = false;
+    if (!s.fb.idea || s.fb.idea.id !== id) { s.fb.idea = null; s.fb.comments = []; s.fb.comment = ''; }
+    render();
+    return req('GET', '/api/widget/ideas/' + id).then(function (d) {
+      s.fb.idea = d.idea; s.fb.comments = d.comments;
+      if (s.view === 'idea') render();
+    }).catch(function (e) { flash(e.message); openBoard(); });
+  }
+  function vote(it) {
+    var on = !it.voted;
+    it.voted = on; it.votes += on ? 1 : -1; // show it straight away
+    render();
+    ensureToken().then(function () {
+      return req('POST', '/api/widget/ideas/' + it.id + '/vote', { vote: on });
+    }).then(function (d) {
+      it.votes = d.votes; it.voted = d.voted;
+      s.fb.ideas.forEach(function (x) { if (x.id === it.id) { x.votes = d.votes; x.voted = d.voted; } });
+      render();
+    }).catch(function (e) {
+      it.voted = !on; it.votes += on ? -1 : 1;
+      render(); flash(e.message);
+    });
+  }
+  function needWho() { return !s.contact.email || !(s.contact.name || '').trim(); }
+  // whoCard: name + email, asked once before the first post or comment.
+  function whoCard(then) {
+    var card = el('div', 'card');
+    var name = el('input'); name.type = 'text'; name.autocomplete = 'name'; name.value = s.contact.name || ''; name.maxLength = 100;
+    var email = el('input'); email.type = 'email'; email.autocomplete = 'email'; email.value = s.contact.email || ''; email.maxLength = 254;
+    var ln = el('label', null, 'Your name'); ln.append(name);
+    var le = el('label', null, 'Email'); le.append(email);
+    var err = el('div', 'err', s.fb.err);
+    var go = btn('pri', 'Continue', function () {
+      if (!name.value.trim() || !email.value.trim()) { err.textContent = 'Please add your name and email.'; return; }
+      go.disabled = true;
+      ensureToken().then(function () {
+        return req('POST', '/api/widget/profile', { name: name.value.trim(), email: email.value.trim() });
+      }).then(function (d) { s.contact = d.contact; s.fb.err = ''; s.fb.askWho = false; then(); })
+        .catch(function (e) { err.textContent = e.message; go.disabled = false; });
+    });
+    card.append(el('div', 'h', 'Who’s posting?'),
+      el('p', null, 'So we can let you know when your idea moves forward. Your email is never shown on the board.'),
+      ln, le, err, go);
+    setTimeout(function () { (name.value ? email : name).focus(); }, 30);
+    return card;
+  }
+  function postIdea() {
+    if (needWho()) { s.fb.askWho = true; render(); return; }
+    s.fb.busy = true; s.fb.err = ''; render();
+    ensureToken().then(function () {
+      return req('POST', '/api/widget/ideas', { title: s.fb.title, body: s.fb.body });
+    }).then(function (d) {
+      s.fb.title = s.fb.body = ''; s.fb.busy = false;
+      s.fb.idea = d.idea; s.fb.comments = [];
+      s.fb.loaded = false;
+      openIdea(d.idea.id);
+      flash(d.idea.approved ? 'Posted — thanks!' : 'Thanks! We’ll put it on the board once we’ve had a look.');
+    }).catch(function (e) {
+      s.fb.busy = false;
+      if (e.status === 428) s.fb.askWho = true; else s.fb.err = e.message;
+      render();
+    });
+  }
+  function postComment() {
+    var it = s.fb.idea;
+    if (!it || !s.fb.comment.trim()) return;
+    if (needWho()) { s.fb.askWho = true; render(); return; }
+    s.fb.busy = true; render();
+    req('POST', '/api/widget/ideas/' + it.id + '/comments', { body: s.fb.comment }).then(function () {
+      s.fb.comment = ''; s.fb.busy = false;
+      return openIdea(it.id);
+    }).catch(function (e) {
+      s.fb.busy = false;
+      if (e.status === 428) s.fb.askWho = true; else flash(e.message);
+      render();
+    });
+  }
+  function voteButton(it) {
+    var b = el('button', 'vote' + (it.voted ? ' on' : ''));
+    b.type = 'button';
+    b.setAttribute('aria-pressed', it.voted ? 'true' : 'false');
+    b.setAttribute('aria-label', (it.voted ? 'Remove your vote for ' : 'Vote for ') + it.title + ', ' + it.votes + (it.votes === 1 ? ' vote' : ' votes'));
+    b.innerHTML = ICON_UP;
+    b.append(el('b', null, String(it.votes)));
+    b.disabled = it.status === 'closed' && !it.voted;
+    b.onclick = function (e) { e.stopPropagation(); vote(it); };
+    return b;
+  }
+  function renderIdeas() {
+    var b = ui.body;
+    b.textContent = '';
+    var add = iconButton('newbtn', ICON_PLUS, 'Post an idea', 'Post an idea');
+    add.onclick = function () { s.view = 'newidea'; s.fb.err = ''; s.fb.askWho = false; render(); };
+    var bar = el('div', 'fbbar');
+    [['active', 'All'], ['planned', 'Planned'], ['in_progress', 'In progress'], ['complete', 'Done']].forEach(function (o) {
+      var t = btn('tab' + (s.fb.status === o[0] ? ' on' : ''), o[1], function () { s.fb.status = o[0]; loadIdeas().catch(function (e) { flash(e.message); }); render(); });
+      t.setAttribute('aria-pressed', s.fb.status === o[0] ? 'true' : 'false');
+      bar.append(t);
+    });
+    var sort = el('select', 'sort');
+    sort.setAttribute('aria-label', 'Sort ideas');
+    [['top', 'Top'], ['new', 'New']].forEach(function (o) { var op = el('option', null, o[1]); op.value = o[0]; op.selected = s.fb.sort === o[0]; sort.append(op); });
+    sort.onchange = function () { s.fb.sort = sort.value; loadIdeas().catch(function (e) { flash(e.message); }); };
+    bar.append(sort);
+    b.append(add, bar);
+    if (!s.fb.loaded) { b.append(el('div', 'empty', 'Loading…')); return; }
+    if (!s.fb.ideas.length) b.append(el('div', 'empty', s.fb.status === 'active' ? 'No ideas yet — be the first to post one.' : 'Nothing here yet.'));
+    s.fb.ideas.forEach(function (it) {
+      var row = el('div', 'idea');
+      var main = el('button', 'im');
+      main.type = 'button';
+      main.append(el('div', 'it', it.title));
+      var meta = el('div', 'imeta');
+      meta.append(el('span', 'chip i-' + it.status, it.approved ? it.status_label : 'Awaiting approval'));
+      if (it.comments) meta.append(document.createTextNode(it.comments + (it.comments === 1 ? ' comment' : ' comments')));
+      main.append(meta);
+      main.onclick = function () { openIdea(it.id); };
+      row.append(voteButton(it), main);
+      b.append(row);
+    });
+    b.scrollTop = 0;
+  }
+  function renderIdea() {
+    var b = ui.body, it = s.fb.idea;
+    b.textContent = '';
+    if (!it) { b.append(el('div', 'empty', 'Loading…')); return; }
+    var head = el('div', 'idea big');
+    var hm = el('div', 'im');
+    hm.append(el('div', 'it', it.title));
+    var meta = el('div', 'imeta');
+    meta.append(el('span', 'chip i-' + it.status, it.approved ? it.status_label : 'Awaiting approval'),
+      document.createTextNode(it.author_name + ' · ' + day(it.created_at)));
+    hm.append(meta);
+    head.append(voteButton(it), hm);
+    b.append(head);
+    if (it.body) b.append(el('div', 'ibody', it.body));
+    if (!it.approved) b.append(el('div', 'note', 'Only you can see this until our team approves it.'));
+    b.append(el('div', 'sect', 'Activity'));
+    if (!s.fb.comments.length) b.append(el('div', 'empty small', 'No comments yet.'));
+    s.fb.comments.forEach(function (c) {
+      if (c.author_type === 'system') { b.append(el('div', 'sys', c.body + ' · ' + day(c.created_at))); return; }
+      var row = el('div', 'm ' + (c.mine ? 'me' : 'them'));
+      row.append(el('div', 'by', (c.mine ? 'You' : c.author_name) + ' · ' + day(c.created_at)), el('div', 'b', c.body));
+      b.append(row);
+    });
+    if (s.fb.askWho) { b.append(whoCard(postComment)); return; }
+    if (it.approved && it.status !== 'closed') {
+      var box = el('div', 'cbox');
+      var ta = el('textarea');
+      ta.rows = 2; ta.maxLength = 3000; ta.placeholder = 'Add a comment…'; ta.value = s.fb.comment;
+      ta.setAttribute('aria-label', 'Comment');
+      ta.oninput = function () { s.fb.comment = ta.value; };
+      var go = iconButton('send', ICON_SEND, 'Post comment');
+      go.disabled = s.fb.busy;
+      go.onclick = postComment;
+      box.append(ta, go);
+      b.append(box);
+    }
+  }
+  function renderNewIdea() {
+    var b = ui.body;
+    b.textContent = '';
+    if (s.fb.askWho) { b.append(whoCard(postIdea)); return; }
+    var card = el('div', 'card');
+    var title = el('input'); title.type = 'text'; title.maxLength = 120; title.value = s.fb.title; title.placeholder = 'Short and specific';
+    title.oninput = function () { s.fb.title = title.value; };
+    var body = el('textarea'); body.rows = 5; body.maxLength = 5000; body.value = s.fb.body; body.placeholder = 'What would it do for you?';
+    body.oninput = function () { s.fb.body = body.value; };
+    var lt = el('label', null, 'Your idea'); lt.append(title);
+    var lb = el('label', null, 'Details (optional)'); lb.append(body);
+    var go = btn('pri', s.fb.busy ? 'Posting…' : 'Post idea', postIdea);
+    go.disabled = s.fb.busy;
+    card.append(el('div', 'h', 'Share an idea'), el('p', null, 'Others can vote on it, and you’ll see when it’s planned or done.'), lt, lb, el('div', 'err', s.fb.err), go);
+    b.append(card);
+    setTimeout(function () { if (!title.value) title.focus(); }, 30);
+  }
+
   // ---------- UI ----------
   var css = [
     ':host{all:initial}',
@@ -351,6 +546,32 @@
     '.typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}',
     '@keyframes hdblink{0%,80%,100%{opacity:.25}40%{opacity:1}}',
     '.flash{position:absolute;left:12px;right:12px;bottom:76px;background:var(--text);color:var(--bg);padding:8px 12px;border-radius:10px;font-size:13px}',
+    '.fbbar{display:flex;gap:4px;align-items:center;flex-wrap:wrap}',
+    '.fbbar .tab{height:30px;padding:0 10px;border:0;border-radius:8px;background:var(--sunken);color:var(--muted);font-size:12.5px;font-weight:600;cursor:pointer}',
+    '.fbbar .tab.on{background:var(--a);color:#fff}',
+    '.fbbar .sort{margin-left:auto;height:30px;border:1px solid var(--line2);border-radius:8px;background:var(--field);color:var(--text);font:inherit;font-size:12.5px;padding:0 6px}',
+    '.idea{display:flex;gap:10px;align-items:stretch}',
+    '.idea .im{flex:1;min-width:0;text-align:left;background:var(--bg);border:1px solid var(--line2);border-radius:12px;padding:10px 12px;cursor:pointer;color:var(--text);display:grid;gap:4px}',
+    '.idea .im:hover{border-color:var(--a)}',
+    '.idea.big .im{border:0;padding:0 2px;cursor:default}',
+    '.idea.big .it{font-size:16px}',
+    '.it{font-weight:600;overflow-wrap:anywhere}',
+    '.imeta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted)}',
+    '.vote{width:52px;flex:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:1px solid var(--line2);border-radius:12px;background:var(--bg);color:var(--text);cursor:pointer;min-height:56px;font-variant-numeric:tabular-nums}',
+    '.vote svg{width:16px;height:16px}',
+    '.vote b{font-size:14px}',
+    '.vote:hover{border-color:var(--a)}',
+    '.vote.on{background:var(--a);border-color:var(--a);color:#fff}',
+    '.vote:disabled{opacity:.5;cursor:default}',
+    '.ibody{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px}',
+    '.note{font-size:13px;color:var(--warn);background:var(--warn-bg);border-radius:10px;padding:8px 12px}',
+    '.empty.small{padding:8px}',
+    '.chip.i-under_review{background:var(--warn-bg);color:var(--warn)}',
+    '.chip.i-planned,.chip.i-in_progress{background:var(--ai-bg);color:var(--ai)}',
+    '.chip.i-complete{background:var(--ok-bg);color:var(--ok)}',
+    '.card textarea{border:1px solid var(--line2);border-radius:10px;padding:10px 12px;font:inherit;color:var(--text);background:var(--field);width:100%;resize:vertical}',
+    '.cbox{display:flex;gap:8px;align-items:flex-end;margin-top:4px}',
+    '.cbox textarea{flex:1;border:1px solid var(--line2);border-radius:12px;padding:10px 12px;font:inherit;color:var(--text);background:var(--field);resize:vertical;min-height:44px}',
     '@media (max-width:480px){.wrap{right:12px;bottom:12px}.panel{position:fixed;inset:0;width:auto;height:auto;border-radius:0;bottom:0}.wrap.open .bubble{display:none}}',
     '@media (prefers-reduced-motion:reduce){.panel,.bubble{transition:none}}',
   ].join('\n');
@@ -363,6 +584,8 @@
   var ICON_LIST = '<svg viewBox="0 0 24 24" fill="none"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
   var ICON_BACK = '<svg viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>';
+  var ICON_UP = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 15l6-6 6 6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var ICON_IDEA = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.4 1 1.1 1 1.8V16h5v-.3c0-.7.4-1.4 1-1.8A6 6 0 0 0 12 3z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var ICON_X = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
   function el(tag, cls, text) {
@@ -412,6 +635,7 @@
   var head = el('div', 'head');
   ui.back = iconButton('hb', ICON_BACK, 'Back');
   ui.back.onclick = function () {
+    if (s.view === 'idea' || s.view === 'newidea') { s.fb.askWho = false; openBoard(); return; }
     if (s.current || s.messages.length) { s.view = 'chat'; render(); } else newConversation();
   };
   ui.logo = el('div', 'logo');
@@ -422,11 +646,13 @@
   t.append(ui.name, ui.status);
   ui.casesBtn = iconButton('hb', ICON_LIST, 'Your cases', 'Cases');
   ui.casesBtn.onclick = function () { s.view = 'list'; render(); loadCases().catch(function () { }); };
+  ui.ideasBtn = iconButton('hb', ICON_IDEA, 'Feedback and ideas', 'Ideas');
+  ui.ideasBtn.onclick = openBoard;
   var x = iconButton('hb', ICON_X, 'Close chat');
   x.onclick = function () { toggle(false); };
   ui.themeBtn = iconButton('hb', ICON_THEME, 'Switch theme');
   ui.themeBtn.onclick = function () { setTheme(isDark() ? 'light' : 'dark'); };
-  head.append(ui.back, ui.logo, t, ui.casesBtn, ui.themeBtn, x);
+  head.append(ui.back, ui.logo, t, ui.casesBtn, ui.ideasBtn, ui.themeBtn, x);
 
   ui.casebar = el('div', 'casebar');
   ui.body = el('div', 'body');
@@ -542,12 +768,16 @@
   function render() {
     renderBadge();
     var online = s.settings.online;
-    var list = s.view === 'list';
+    var board = isBoard();
+    if (board && !s.settings.feedback) { s.view = 'chat'; board = false; }
+    var list = s.view === 'list' || board;
     var unseenOther = Object.keys(s.unseen).some(function (id) { return !s.current || Number(id) !== s.current.id; });
 
-    ui.name.textContent = list ? 'Your cases' : (s.settings.brand_name || 'Support');
+    ui.name.textContent = board ? (s.settings.feedback_title || 'Feedback & ideas') : list ? 'Your cases' : (s.settings.brand_name || 'Support');
     ui.status.textContent = '';
-    if (list) {
+    if (board) {
+      ui.status.append(document.createTextNode('Vote on what we do next'));
+    } else if (list) {
       ui.status.append(document.createTextNode(s.cases.length + (s.cases.length === 1 ? ' case' : ' cases')));
     } else {
       ui.status.append(el('span', 'dot' + (online ? ' on' : '')),
@@ -556,7 +786,8 @@
     ui.back.hidden = !list;
     ui.logo.hidden = true; // set below, once we know whether the Cases button needs the room
     ui.casesBtn.hidden = list || !s.cases.length;
-    ui.logo.hidden = list || !ui.casesBtn.hidden;
+    ui.ideasBtn.hidden = list || !s.settings.feedback;
+    ui.logo.hidden = list || !ui.casesBtn.hidden || !ui.ideasBtn.hidden;
     var pip = ui.casesBtn.querySelector('.pip');
     if (unseenOther && !pip) ui.casesBtn.append(el('span', 'pip'));
     if (!unseenOther && pip) pip.remove();
@@ -576,7 +807,10 @@
     ui.closedFoot.hidden = !closed;
     if (closed) ui.closedNote.textContent = 'This case was closed' + (c.closed_at ? ' ' + day(c.closed_at) : '') + '. Need more help?';
 
-    if (list) renderList(); else renderChat();
+    if (s.view === 'ideas') renderIdeas();
+    else if (s.view === 'idea') renderIdea();
+    else if (s.view === 'newidea') renderNewIdea();
+    else if (list) renderList(); else renderChat();
   }
 
   function renderChat() {

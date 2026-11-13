@@ -25,6 +25,7 @@ const state = {
   q: '',
   myTasks: [],         // my open tasks (plus today's finished ones) — drives the Activities badge
   caseTasks: [],       // tasks linked to the open conversation
+  ideaPending: 0,      // feedback ideas waiting for approval (sidebar badge)
 };
 
 // ---------- this device: presence + sound ----------
@@ -271,6 +272,7 @@ function parseRoute() {
   if (p[0] === 'settings') return { kind: 'settings' };
   if (p[0] === 'cases') return { kind: 'cases', params: new URLSearchParams(query) };
   if (p[0] === 'activities') return { kind: 'activities', params: new URLSearchParams(query) };
+  if (p[0] === 'feedback') return { kind: 'feedback', id: /^\d+$/.test(p[1] || '') ? Number(p[1]) : null, params: new URLSearchParams(query) };
   if (p[0] === 'knowledge') return { kind: 'knowledge', id: p[1] === 'new' ? 'new' : /^\d+$/.test(p[1] || '') ? Number(p[1]) : null };
   if (p[0] === 'view' && VIEWS.some(v => v[0] === p[1])) return { kind: 'view', view: p[1] };
   return { kind: 'view', view: 'open' };
@@ -294,6 +296,10 @@ async function route() {
   }
   if (r.kind === 'knowledge') {
     if (r.id) renderArticleEditor(r.id); else renderKnowledge();
+    return;
+  }
+  if (r.kind === 'feedback') {
+    if (r.id) renderIdea(r.id); else renderFeedback(r.params);
     return;
   }
   if (!els.shell || !document.body.contains(els.shell) || inPage()) renderShell();
@@ -462,6 +468,8 @@ function renderSidebar() {
     activitiesNav(route.kind === 'activities'),
     h('a', { class: 'nav-item' + (route.kind === 'cases' ? ' active' : ''), href: '#/cases' }, 'All cases'),
     h('a', { class: 'nav-item' + (route.kind === 'knowledge' ? ' active' : ''), href: '#/knowledge' }, 'Knowledge'),
+    state.settings.feedback_enabled === '1' || state.ideaPending ? h('a', { class: 'nav-item' + (route.kind === 'feedback' ? ' active' : ''), href: '#/feedback' }, 'Feedback',
+      state.ideaPending ? h('span', { class: 'count hot', title: `${state.ideaPending} waiting for approval` }, state.ideaPending) : null) : null,
     h('a', { class: 'nav-item' + (route.kind === 'settings' ? ' active' : ''), href: '#/settings' }, 'Settings'),
     h('div', { class: 'spacer' }),
     h('div', { class: 'away-toggle', role: 'group', 'aria-label': 'Your status' },
@@ -996,6 +1004,9 @@ function handleEvent({ type, data }) {
     case 'task':
       applyTask(data);
       break;
+    case 'ideas':
+      ideasChanged(data.id);
+      break;
     case 'task_deleted':
       removeTask(data.id);
       break;
@@ -1052,6 +1063,7 @@ async function renderSettings() {
     notificationsCard(isAdmin),
     isAdmin ? aiCard() : null,
     isAdmin ? categoriesCard() : null,
+    isAdmin ? feedbackCard() : null,
     teamCard(isAdmin),
     accountCard(),
     isAdmin ? opsCard() : null,
@@ -1189,6 +1201,261 @@ function aiCard() {
         } catch (ex) { err.textContent = ex.message; }
       },
     }, 'Save AI settings'));
+}
+
+// ---------- feedback board ----------
+const IDEA_STATUSES = [
+  ['open', 'Open'], ['under_review', 'Under review'], ['planned', 'Planned'],
+  ['in_progress', 'In progress'], ['complete', 'Complete'], ['closed', 'Closed'],
+];
+const ideaLabel = (k) => (IDEA_STATUSES.find(x => x[0] === k) || [k, k])[1];
+const ideaPill = (k) => h('span', { class: 'pill idea-' + k }, ideaLabel(k));
+
+async function loadIdeaCounts(render = true) {
+  try {
+    const r = await api('GET', '/api/ideas/counts');
+    state.ideaPending = r.counts.pending || 0;
+  } catch { return; }
+  if (render) renderSidebar();
+}
+
+let ideasTimer = null, ideaPageReload = null;
+function ideasChanged(id) {
+  clearTimeout(ideasTimer);
+  ideasTimer = setTimeout(() => {
+    loadIdeaCounts();
+    const r = parseRoute();
+    if (r.kind === 'feedback' && ideaPageReload && (!r.id || r.id === id)) ideaPageReload();
+  }, 300);
+}
+
+async function renderFeedback(params) {
+  const main = enterPage('cases feedback');
+  const f = { status: params.get('status') || 'active', sort: params.get('sort') || 'top', q: params.get('q') || '' };
+  const list = h('div', { class: 'idea-list' });
+  const tabsEl = h('div', { class: 'seg', role: 'group', 'aria-label': 'Status' });
+  let seq = 0, timer;
+  const syncUrl = () => {
+    const p = new URLSearchParams();
+    if (f.status !== 'active') p.set('status', f.status);
+    if (f.sort !== 'top') p.set('sort', f.sort);
+    if (f.q) p.set('q', f.q);
+    const qs = p.toString();
+    history.replaceState(null, '', '#/feedback' + (qs ? '?' + qs : ''));
+  };
+  function tabs(counts) {
+    const n = (k) => k === 'active' ? IDEA_STATUSES.filter(([s]) => s !== 'closed').reduce((t, [s]) => t + (counts[s] || 0), 0) : counts[k] || 0;
+    const opts = [['active', 'All active'], ...IDEA_STATUSES, ['pending', 'Needs approval']];
+    fill(tabsEl, opts.map(([k, t]) => h('button', {
+      class: 'seg-btn' + (f.status === k ? ' on' : '') + (k === 'pending' && n(k) ? ' attn' : ''), type: 'button',
+      'aria-pressed': String(f.status === k),
+      onclick: () => { f.status = k; syncUrl(); load(); },
+    }, t, h('span', { class: 'seg-n' }, n(k)))));
+  }
+  async function load() {
+    const my = ++seq;
+    const p = new URLSearchParams({ status: f.status, sort: f.sort });
+    if (f.q) p.set('q', f.q);
+    try {
+      const r = await api('GET', '/api/ideas?' + p);
+      if (my !== seq) return;
+      state.ideaPending = r.counts.pending || 0;
+      renderSidebar();
+      tabs(r.counts);
+      if (!r.ideas.length) {
+        fill(list, h('div', { class: 'empty' },
+          h('strong', {}, f.q ? 'No ideas match' : f.status === 'pending' ? 'Nothing waiting for approval' : 'No ideas here yet'),
+          f.q ? 'Try other words.' : 'Customers post and vote on ideas from the chat widget and your public board.'));
+        return;
+      }
+      fill(list, h('div', { class: 'case-table' }, r.ideas.map(ideaRow)));
+    } catch (ex) {
+      if (my === seq) fill(list, h('div', { class: 'empty' }, ex.message));
+    }
+  }
+  ideaPageReload = load;
+  const publicUrl = `${state.baseUrl}/feedback`;
+  const off = state.settings.feedback_enabled !== '1';
+  fill(main,
+    h('div', { class: 'cases-top' },
+      h('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, menuButton(), h('h1', { style: 'flex:1' }, 'Feedback'),
+        h('a', { class: 'btn', href: publicUrl, target: '_blank', rel: 'noopener' }, 'Open public board'),
+        h('button', { class: 'btn primary', onclick: () => newIdeaDialog() }, '+ New idea')),
+      h('p', {}, 'Ideas customers post and vote on, from the chat widget and ', h('a', { href: publicUrl, target: '_blank', rel: 'noopener' }, publicUrl.replace(/^https?:\/\//, '')), '. Move them through the statuses — customers see every change.')),
+    off ? h('div', { class: 'callout', style: 'margin-bottom:16px' }, 'The feedback board is switched off, so customers can\'t see it. An admin can turn it on in Settings → Feedback board.') : null,
+    h('div', { class: 'cases-toolbar' },
+      h('div', { class: 'cases-search' }, h('input', {
+        class: 'input', type: 'search', placeholder: 'Search ideas…', 'aria-label': 'Search ideas', value: f.q,
+        oninput: (e) => { clearTimeout(timer); timer = setTimeout(() => { f.q = e.target.value.trim(); syncUrl(); load(); }, 250); },
+      })),
+      h('label', { class: 'groupby' }, h('span', { class: 'small muted' }, 'Sort'),
+        h('select', { class: 'input', onchange: (e) => { f.sort = e.target.value; syncUrl(); load(); } },
+          h('option', { value: 'top', selected: f.sort === 'top' }, 'Most votes'),
+          h('option', { value: 'new', selected: f.sort === 'new' }, 'Newest')))),
+    h('div', { class: 'idea-tabs' }, tabsEl),
+    list);
+  load();
+}
+
+function ideaRow(it) {
+  return h('a', { class: 'idea-row', href: `#/feedback/${it.id}` },
+    h('span', { class: 'idea-votes', title: `${it.votes} vote${it.votes === 1 ? '' : 's'}` }, h('span', { class: 'up', 'aria-hidden': 'true' }, '▲'), h('b', {}, it.votes)),
+    h('span', { class: 'kb-main' },
+      h('span', { class: 'c-title' }, it.title),
+      h('span', { class: 'c-preview' }, [it.author_type === 'agent' ? `Added by ${it.author_name || 'an agent'}` : `${it.author_name || 'A customer'}`,
+        it.comments ? `${it.comments} comment${it.comments === 1 ? '' : 's'}` : '', relTime(it.created_at)].filter(Boolean).join(' · '))),
+    h('span', { class: 'idea-tags' }, !it.approved ? h('span', { class: 'pill pending' }, 'Needs approval') : null, ideaPill(it.status)));
+}
+
+function newIdeaDialog(prefill = {}) {
+  const err = h('div', { class: 'error' });
+  const title = h('input', { class: 'input', maxlength: 120, value: prefill.title || '', required: true, placeholder: 'Short and specific, e.g. "Order tracking by SMS"' });
+  const body = h('textarea', { class: 'input', rows: 5, maxlength: 5000, placeholder: 'What should it do, and why does it matter?' });
+  body.value = prefill.body || '';
+  const status = h('select', { class: 'input' }, IDEA_STATUSES.map(([k, t]) => h('option', { value: k }, t)));
+  const dlg = h('dialog', { class: 't-dialog' });
+  const form = h('form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      try {
+        const r = await api('POST', '/api/ideas', { title: title.value, body: body.value, status: status.value, source_case: prefill.source_case || null });
+        dlg.close();
+        location.hash = `#/feedback/${r.idea.id}`;
+      } catch (ex) { err.textContent = ex.message; }
+    },
+  },
+    h('div', { class: 't-dialog-h' }, h('h2', {}, 'New idea'),
+      h('button', { type: 'button', class: 'btn ghost', 'aria-label': 'Close', onclick: () => dlg.close() }, '✕')),
+    h('div', { class: 'field' }, h('span', {}, 'Title'), title),
+    h('div', { class: 'field' }, h('span', {}, 'Details'), body),
+    h('div', { class: 'field' }, h('span', {}, 'Status'), status),
+    err,
+    h('div', { class: 't-dialog-f' }, h('button', { class: 'btn primary', type: 'submit' }, 'Add idea'),
+      h('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Cancel')));
+  dlg.append(form);
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  title.focus();
+}
+
+async function renderIdea(id) {
+  const main = enterPage('cases feedback');
+  async function load() {
+    let r;
+    try { r = await api('GET', `/api/ideas/${id}`); }
+    catch (ex) { toast(ex.message); location.hash = '#/feedback'; return; }
+    const it = r.idea;
+    const err = h('div', { class: 'error' });
+    const patch = async (body, msg) => {
+      try { await api('PATCH', `/api/ideas/${id}`, body); if (msg) toast(msg); await load(); }
+      catch (ex) { toast(ex.message); }
+    };
+    const statusSel = h('select', { class: 'input status-select', 'aria-label': 'Idea status', onchange: (e) => patch({ status: e.target.value }, 'Status updated — customers can see it') },
+      IDEA_STATUSES.map(([k, t]) => h('option', { value: k, selected: k === it.status }, t)));
+    const title = h('input', { class: 'input', value: it.title, maxlength: 120, 'aria-label': 'Title' });
+    const body = h('textarea', { class: 'input', rows: 5, maxlength: 5000, 'aria-label': 'Details' });
+    body.value = it.body;
+    const reply = h('textarea', { class: 'input', rows: 3, maxlength: 3000, placeholder: 'Reply on the idea — customers can see this', 'aria-label': 'Reply' });
+    const author = it.author_type === 'agent'
+      ? `Added by ${it.author_name || 'an agent'}`
+      : it.contact_id ? h('span', {}, 'Posted by ', h('a', { href: `#/cases?contact=${it.contact_id}` }, it.author_name || it.contact_email || 'a customer'), it.contact_email && it.author_name ? ` · ${it.contact_email}` : '')
+        : 'Posted by a customer';
+    fill(main,
+      h('div', { class: 'cases-top' },
+        h('a', { class: 'small', href: '#/feedback' }, '← Feedback'),
+        h('div', { class: 'idea-head' },
+          h('div', { class: 'idea-votes big', title: 'Votes' }, h('span', { class: 'up', 'aria-hidden': 'true' }, '▲'), h('b', {}, it.votes), h('span', { class: 'small muted' }, it.votes === 1 ? 'vote' : 'votes')),
+          h('div', { style: 'flex:1;min-width:0' },
+            h('h1', { style: 'margin:0 0 4px' }, it.title),
+            h('div', { class: 'small muted' }, author, ' · ', shortDate(it.created_at),
+              it.source_case ? h('span', {}, ' · from case ', h('a', { href: `#/c/${it.source_case}` }, caseNo(it.source_case))) : null)),
+          h('div', { class: 'idea-actions' }, statusSel))),
+      !it.approved ? h('div', { class: 'callout idea-approve' },
+        h('span', {}, 'Only the customer who posted this can see it until it\'s approved.'),
+        h('button', { class: 'btn primary', onclick: () => patch({ approved: true }, 'Approved — it\'s on the board') }, 'Approve'),
+        h('button', { class: 'btn', onclick: () => delIdea() }, 'Delete')) : null,
+      h('div', { class: 'idea-grid' },
+        h('div', {},
+          h('section', { class: 'card' },
+            h('h2', {}, 'Idea'),
+            h('label', { class: 'field' }, 'Title', title),
+            h('label', { class: 'field' }, 'Details', body),
+            err,
+            h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+              h('button', {
+                class: 'btn primary', onclick: async () => {
+                  err.textContent = '';
+                  try { await api('PATCH', `/api/ideas/${id}`, { title: title.value, body: body.value }); toast('Saved'); await load(); }
+                  catch (ex) { err.textContent = ex.message; }
+                },
+              }, 'Save'),
+              it.approved ? h('button', { class: 'btn', onclick: () => patch({ approved: false }, 'Hidden from the board') }, 'Hide from board') : null,
+              h('button', { class: 'btn danger', onclick: () => delIdea() }, 'Delete'))),
+          h('section', { class: 'card' },
+            h('h2', {}, `Activity · ${r.comments.filter(c => c.author_type !== 'system').length}`),
+            r.comments.length ? h('div', { class: 'idea-comments' }, r.comments.map(c => c.author_type === 'system'
+              ? h('div', { class: 'idea-sys' }, `${c.body} · ${agentName(c.author_id) || 'agent'} · ${relTime(c.created_at)}`)
+              : h('div', { class: 'idea-c' + (c.author_type === 'agent' ? ' agent' : '') },
+                h('div', { class: 'small muted' }, h('b', {}, c.author_name || (c.author_type === 'agent' ? 'Agent' : 'Customer')), c.author_type === 'agent' ? ' · team' : '', ' · ', relTime(c.created_at),
+                  h('button', {
+                    class: 'btn ghost sm', style: 'margin-left:auto', 'aria-label': 'Delete comment', onclick: async () => {
+                      if (!confirm('Delete this comment?')) return;
+                      try { await api('DELETE', `/api/ideas/${id}/comments/${c.id}`); await load(); } catch (ex) { toast(ex.message); }
+                    },
+                  }, 'Delete')),
+                h('div', { class: 'idea-cb' }, c.body))))
+              : h('p', { class: 'small muted' }, 'No comments yet.'),
+            reply,
+            h('button', {
+              class: 'btn primary', style: 'margin-top:8px', onclick: async () => {
+                if (!reply.value.trim()) return;
+                try { await api('POST', `/api/ideas/${id}/comments`, { body: reply.value }); await load(); } catch (ex) { toast(ex.message); }
+              },
+            }, 'Post reply'))),
+        h('section', { class: 'card idea-voters' },
+          h('h2', {}, `Voters · ${r.voters.length}`),
+          r.voters.length ? h('div', {}, r.voters.map(v => h('a', { class: 'idea-voter', href: `#/cases?contact=${v.contact_id}` },
+            avatar(v.name || v.email || '?', v.contact_id, { sm: true }),
+            h('span', { class: 'kb-main' },
+              h('span', { class: 'c-title' }, v.name || v.email || `Visitor #${v.contact_id}`),
+              h('span', { class: 'c-preview' }, [v.name && v.email ? v.email : '', v.cases ? `${v.cases} case${v.cases === 1 ? '' : 's'}` : 'no cases', relTime(v.voted_at)].filter(Boolean).join(' · '))))))
+            : h('p', { class: 'small muted' }, 'No votes yet.'))));
+    async function delIdea() {
+      if (!confirm('Delete this idea, its votes and comments? This can\'t be undone.')) return;
+      try { await api('DELETE', `/api/ideas/${id}`); toast('Deleted'); location.hash = '#/feedback'; } catch (ex) { toast(ex.message); }
+    }
+  }
+  ideaPageReload = load;
+  await load();
+}
+
+function feedbackCard() {
+  const s = state.settings;
+  const err = h('div', { class: 'error' });
+  const on = h('input', { type: 'checkbox', checked: s.feedback_enabled === '1' });
+  const approval = h('input', { type: 'checkbox', checked: s.feedback_approval === '1' });
+  const title = h('input', { class: 'input', value: s.feedback_title || 'Feedback & ideas', maxlength: 60 });
+  const url = `${state.baseUrl}/feedback`;
+  return h('section', { class: 'card' },
+    h('h2', {}, 'Feedback board'),
+    h('p', {}, 'Customers post ideas and vote from the chat widget (Ideas button) and the public page ', h('a', { href: url, target: '_blank', rel: 'noopener' }, url), '. Voting takes one tap; posting and commenting ask for a name and email.'),
+    h('label', { class: 'check' }, on, ' Show the feedback board to customers'),
+    h('label', { class: 'check' }, approval, ' New customer ideas wait for an agent to approve them'),
+    h('label', { class: 'field' }, 'Board title', title),
+    err,
+    h('button', {
+      class: 'btn primary', onclick: async () => {
+        err.textContent = '';
+        try {
+          const r = await api('PUT', '/api/settings', { feedback_enabled: on.checked ? '1' : '0', feedback_approval: approval.checked ? '1' : '0', feedback_title: title.value });
+          state.settings = r.settings;
+          renderSidebar();
+          toast('Saved');
+        } catch (ex) { err.textContent = ex.message; }
+      },
+    }, 'Save feedback settings'));
 }
 
 // ---------- knowledge base ----------
@@ -2312,6 +2579,7 @@ async function boot() {
   state.agents = a.agents;
   state.settings = s.settings;
   await loadMyTasks(false);
+  await loadIdeaCounts(false);
   renderShell();
   startStream();
   await route();

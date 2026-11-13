@@ -73,6 +73,11 @@ func (a *App) Routes() http.Handler {
 	wm.HandleFunc("GET /api/widget/last-case", a.visitor(a.widgetLastCase))
 	wm.HandleFunc("POST /api/widget/case-check", a.visitor(a.widgetCaseCheck))
 	wm.HandleFunc("GET /api/widget/stream", a.visitor(a.widgetStream))
+	wm.HandleFunc("GET /api/widget/ideas", a.optionalVisitor(a.widgetIdeas))
+	wm.HandleFunc("GET /api/widget/ideas/{id}", a.optionalVisitor(a.widgetIdea))
+	wm.HandleFunc("POST /api/widget/ideas", a.visitor(a.widgetCreateIdea))
+	wm.HandleFunc("POST /api/widget/ideas/{id}/vote", a.visitor(a.widgetVote))
+	wm.HandleFunc("POST /api/widget/ideas/{id}/comments", a.visitor(a.widgetIdeaComment))
 	mux.Handle("/api/widget/", a.widgetCORS(wm))
 
 	// --- agent API (same-origin, cookie session) ---
@@ -104,6 +109,14 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("PATCH /api/tasks/{id}", a.agent(a.updateTask))
 	mux.HandleFunc("DELETE /api/tasks/{id}", a.agent(a.deleteTask))
 	mux.HandleFunc("POST /api/conversations/{id}/read", a.agent(a.markRead))
+	mux.HandleFunc("GET /api/ideas", a.agent(a.listIdeas))
+	mux.HandleFunc("GET /api/ideas/counts", a.agent(a.ideaCounts))
+	mux.HandleFunc("GET /api/ideas/{id}", a.agent(a.getIdea))
+	mux.HandleFunc("POST /api/ideas", a.agent(a.createIdea))
+	mux.HandleFunc("PATCH /api/ideas/{id}", a.agent(a.updateIdea))
+	mux.HandleFunc("DELETE /api/ideas/{id}", a.agent(a.deleteIdea))
+	mux.HandleFunc("POST /api/ideas/{id}/comments", a.agent(a.agentIdeaComment))
+	mux.HandleFunc("DELETE /api/ideas/{id}/comments/{cid}", a.agent(a.deleteIdeaComment))
 	mux.HandleFunc("GET /api/agents", a.agent(a.listAgents))
 	mux.HandleFunc("POST /api/agents", a.admin(a.createAgent))
 	mux.HandleFunc("PATCH /api/agents/{id}", a.admin(a.updateAgent))
@@ -122,6 +135,11 @@ func (a *App) Routes() http.Handler {
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		http.ServeFileFS(w, r, sub, "widget/widget.js")
+	})
+	// Public feedback board (same API as the widget, same origin).
+	mux.HandleFunc("GET /feedback", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFileFS(w, r, sub, "feedback.html")
 	})
 	mux.HandleFunc("GET /demo", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, sub, "widget/demo.html")

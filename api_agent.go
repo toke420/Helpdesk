@@ -662,6 +662,16 @@ func (a *App) putSettings(w http.ResponseWriter, r *http.Request, ag *Agent) {
 				writeErr(w, http.StatusBadRequest, "AI agent name must be 1–40 characters")
 				return
 			}
+		case "feedback_enabled", "feedback_approval":
+			if v != "0" && v != "1" {
+				writeErr(w, http.StatusBadRequest, k+" must be 0 or 1")
+				return
+			}
+		case "feedback_title":
+			if v == "" || len([]rune(v)) > 60 {
+				writeErr(w, http.StatusBadRequest, "board title must be 1–60 characters")
+				return
+			}
 		case "ai_max_replies":
 			if n, err := strconv.Atoi(v); err != nil || n < 1 || n > 20 {
 				writeErr(w, http.StatusBadRequest, "AI replies per case must be between 1 and 20")

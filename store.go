@@ -189,6 +189,41 @@ var migrations = [][]string{
 	{
 		`ALTER TABLE agents ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0`,
 	},
+	// 9: feedback board — customer ideas, votes and comments.
+	{
+		`CREATE TABLE ideas (
+			id INTEGER PRIMARY KEY,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','under_review','planned','in_progress','complete','closed')),
+			approved INTEGER NOT NULL DEFAULT 1,
+			contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+			agent_id INTEGER REFERENCES agents(id) ON DELETE SET NULL,
+			source_case INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+			merged_into INTEGER REFERENCES ideas(id) ON DELETE SET NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			status_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX ideas_status ON ideas(status, id)`,
+		`CREATE INDEX ideas_contact ON ideas(contact_id)`,
+		`CREATE TABLE idea_votes (
+			idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+			contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (idea_id, contact_id)
+		) WITHOUT ROWID`,
+		`CREATE INDEX idea_votes_contact ON idea_votes(contact_id)`,
+		`CREATE TABLE idea_comments (
+			id INTEGER PRIMARY KEY,
+			idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+			author_type TEXT NOT NULL CHECK (author_type IN ('contact','agent','system')),
+			author_id INTEGER,
+			body TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX idea_comments_idea ON idea_comments(idea_id, id)`,
+	},
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
@@ -1012,6 +1047,10 @@ var defaultSettings = map[string]string{
 	"ai_handoff_message": "I'll pass this to a teammate — they'll reply here as soon as they can. If you need to go, leave your email and we'll reply there.",
 	"ai_instructions":    "",
 	"ai_max_replies":     "4",
+	// Feedback board: on/off, and whether customer ideas wait for an agent's OK.
+	"feedback_enabled":  "1",
+	"feedback_approval": "1",
+	"feedback_title":    "Feedback & ideas",
 }
 
 // Categories returns the configured case categories, one per line.
