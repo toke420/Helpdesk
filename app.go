@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -25,21 +27,27 @@ type App struct {
 	hub    *Hub
 	mailer *Mailer
 	limit  *RateLimiter
-	llm    *LLM
-	aiq    *aiQueue
+
+	// Who's available, and alerts when nobody is (notify.go).
+	pres         *presence
+	httpClient   *http.Client
+	notify       func(ctx context.Context, title, message, click string) error // ntfy; swappable for tests
+	emailMu      sync.Mutex
+	emailPending map[int64]int64 // conversation id → time of first unsent line
+	emailDelay   time.Duration
+
+	llm *LLM
+	aiq *aiQueue
 	// aiDebounce waits for a customer to finish typing a burst of messages.
 	aiDebounce time.Duration
 }
 
 func NewApp(cfg Config, store *Store, mailer *Mailer, llm *LLM) *App {
 	a := &App{cfg: cfg, store: store, hub: NewHub(), mailer: mailer, limit: NewRateLimiter(),
+		pres: newPresence(), httpClient: &http.Client{Timeout: 15 * time.Second},
+		emailPending: map[int64]int64{}, emailDelay: emailDelay,
 		llm: llm, aiq: newAIQueue(), aiDebounce: 1500 * time.Millisecond}
-	// Tell every open widget when the team goes online or offline.
-	a.hub.onChange = func(topic string, active bool) {
-		if topic == "agents" {
-			a.hub.Publish("visitors", Event{Type: "presence", Data: map[string]bool{"online": active}})
-		}
-	}
+	a.notify = a.ntfySend
 	return a
 }
 
@@ -62,6 +70,8 @@ func (a *App) Routes() http.Handler {
 	wm.HandleFunc("GET /api/widget/cases/{id}", a.visitor(a.widgetCase))
 	wm.HandleFunc("POST /api/widget/messages", a.visitor(a.widgetSend))
 	wm.HandleFunc("POST /api/widget/profile", a.visitor(a.widgetProfile))
+	wm.HandleFunc("GET /api/widget/last-case", a.visitor(a.widgetLastCase))
+	wm.HandleFunc("POST /api/widget/case-check", a.visitor(a.widgetCaseCheck))
 	wm.HandleFunc("GET /api/widget/stream", a.visitor(a.widgetStream))
 	mux.Handle("/api/widget/", a.widgetCORS(wm))
 
@@ -70,6 +80,9 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", a.agent(a.logout))
 	mux.HandleFunc("GET /api/me", a.agent(a.me))
 	mux.HandleFunc("PUT /api/me/password", a.agent(a.changePassword))
+	mux.HandleFunc("PUT /api/me/away", a.agent(a.setAway))
+	mux.HandleFunc("POST /api/me/presence", a.agent(a.setPresence))
+	mux.HandleFunc("POST /api/admin/notify-test", a.admin(a.notifyTest))
 	mux.HandleFunc("GET /api/conversations", a.agent(a.listConversations))
 	mux.HandleFunc("GET /api/conversations/counts", a.agent(a.conversationCounts))
 	mux.HandleFunc("GET /api/conversations/{id}", a.agent(a.getConversation))

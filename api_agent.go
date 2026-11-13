@@ -71,7 +71,8 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request, ag *Agent) {
 }
 
 func (a *App) me(w http.ResponseWriter, r *http.Request, ag *Agent) {
-	writeJSON(w, http.StatusOK, map[string]any{"agent": ag, "email_enabled": a.mailer.Enabled(), "base_url": a.cfg.BaseURL, "ai": a.llm.Status()})
+	writeJSON(w, http.StatusOK, map[string]any{"agent": ag, "email_enabled": a.mailer.Enabled(), "base_url": a.cfg.BaseURL,
+		"ntfy_enabled": a.cfg.Ntfy.Enabled(), "notify_email": a.cfg.NotifyEmail, "ai": a.llm.Status()})
 }
 
 func (a *App) changePassword(w http.ResponseWriter, r *http.Request, ag *Agent) {
@@ -111,7 +112,7 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request, ag *Agent) 
 func (a *App) listConversations(w http.ResponseWriter, r *http.Request, ag *Agent) {
 	q := r.URL.Query()
 	before, _ := strconv.ParseInt(q.Get("before"), 10, 64)
-	convs, err := a.store.ListConversations(r.Context(), q.Get("view"), ag.ID, before, 50)
+	convs, err := a.store.ListConversations(r.Context(), q.Get("view"), ag.ID, before, 50, truncate(q.Get("q"), 100))
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "unknown view") {
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -164,7 +165,7 @@ func (a *App) getConversation(w http.ResponseWriter, r *http.Request, ag *Agent)
 		serverError(w, err)
 		return
 	}
-	history, err := a.store.ContactConversations(r.Context(), conv.ContactID)
+	history, err := a.store.ContactConversations(r.Context(), conv.ContactID, conv.Contact.Email)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -214,13 +215,41 @@ func (a *App) agentSend(w http.ResponseWriter, r *http.Request, ag *Agent) {
 				link = a.cfg.BaseURL
 			}
 			a.mailer.Notify(fmt.Sprintf("contact:%d", conv.ContactID), conv.Contact.Email,
-				fmt.Sprintf("New reply from %s", brand),
-				fmt.Sprintf("%s from %s replied:\n\n%s\n\nTo continue the conversation, open the chat on %s\n",
-					ag.Name, brand, body, link))
+				fmt.Sprintf("New reply from %s (case %s)", brand, conv.Number),
+				fmt.Sprintf("%s from %s replied:\n\n%s\n\nTo continue the conversation, open the chat on %s\n\nYour case number is %s. Mention it if you contact us again about this.\n",
+					ag.Name, brand, body, link, conv.Number))
 		}
 	}
 	a.broadcastConversation(r, conv.ID)
 	writeJSON(w, http.StatusCreated, map[string]any{"message": msg})
+}
+
+var caseStateLabels = map[string]string{
+	"open": "Open", "in_progress": "In Progress", "pending": "Awaiting Customer",
+	"pending_vendor": "Awaiting Manufacturer", "awaiting_approval": "Awaiting Approval",
+	"scheduled": "Scheduled", "on_hold": "On Hold", "closed": "Closed",
+}
+
+// customerStateLabels overrides caseStateLabels where the agent wording
+// reads oddly to the customer.
+var customerStateLabels = map[string]string{
+	"pending": "Waiting for your reply",
+}
+
+// caseStateLabel is the full name of a case's state ("Awaiting Approval")
+// as the customer sees it in the widget.
+func caseStateLabel(c *Conversation) string {
+	key := c.Status
+	if c.SubStatus != "" {
+		key = c.SubStatus
+	}
+	if l, ok := customerStateLabels[key]; ok {
+		return l
+	}
+	if l, ok := caseStateLabels[key]; ok {
+		return l
+	}
+	return c.Status
 }
 
 func (a *App) setStatus(w http.ResponseWriter, r *http.Request, ag *Agent) {
@@ -234,11 +263,12 @@ func (a *App) setStatus(w http.ResponseWriter, r *http.Request, ag *Agent) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if req.Status != "open" && req.Status != "pending" && req.Status != "closed" {
-		writeErr(w, http.StatusBadRequest, "status must be open, pending or closed")
+	st, known := CaseStates[req.Status]
+	if !known {
+		writeErr(w, http.StatusBadRequest, "unknown status")
 		return
 	}
-	if req.Status == conv.Status {
+	if st[0] == conv.Status && st[1] == conv.SubStatus {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
@@ -246,14 +276,20 @@ func (a *App) setStatus(w http.ResponseWriter, r *http.Request, ag *Agent) {
 		serverError(w, err)
 		return
 	}
-	if req.Status == "closed" {
+	if req.Status == "closed" && conv.Status != "closed" {
 		// Resolved cases become examples Copilot can learn from.
 		if err := a.store.IndexCase(r.Context(), conv.ID); err != nil {
 			slog.Warn("couldn't index case", "id", conv.ID, "err", err)
 		}
 	}
-	verb := map[string]string{"open": "reopened", "pending": "marked as pending", "closed": "closed"}[req.Status]
-	if note, err := a.store.AddSystemNote(r.Context(), conv.ID, fmt.Sprintf("%s %s the conversation", ag.Name, verb)); err == nil {
+	text := fmt.Sprintf("%s set the status to %s", ag.Name, caseStateLabels[req.Status])
+	switch {
+	case req.Status == "closed":
+		text = ag.Name + " closed the conversation"
+	case conv.Status == "closed":
+		text = fmt.Sprintf("%s reopened the conversation as %s", ag.Name, caseStateLabels[req.Status])
+	}
+	if note, err := a.store.AddSystemNote(r.Context(), conv.ID, text); err == nil {
 		a.hub.Publish("agents", Event{Type: "message", Data: note})
 	}
 	a.broadcastConversation(r, conv.ID)
@@ -387,6 +423,19 @@ func (a *App) markRead(w http.ResponseWriter, r *http.Request, ag *Agent) {
 }
 
 func (a *App) agentStream(w http.ResponseWriter, r *http.Request, ag *Agent) {
+	// Each open inbox says which device it is and whether it's on screen, so
+	// we know whether someone will hear the sound (notify.go).
+	q := r.URL.Query()
+	client := truncate(q.Get("client"), 64)
+	if client == "" {
+		client = newToken()
+	}
+	a.pres.connect(ag.ID, client, q.Get("visible") != "0", q.Get("mobile") == "1")
+	a.presenceChanged()
+	defer func() {
+		a.pres.disconnect(ag.ID, client)
+		a.presenceChanged()
+	}()
 	a.serveSSE(w, r, []Event{{Type: "hello", Data: map[string]int64{"agent_id": ag.ID}}}, "agents", topicAgent(ag.ID))
 }
 
@@ -399,7 +448,7 @@ func (a *App) listAgents(w http.ResponseWriter, r *http.Request, ag *Agent) {
 		return
 	}
 	for _, x := range agents {
-		x.Online = a.hub.Active(topicAgent(x.ID))
+		x.Online = a.pres.connected(x.ID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
 }

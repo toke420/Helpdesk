@@ -40,6 +40,20 @@ func NewMailer(cfg SMTPConfig) *Mailer {
 
 func (m *Mailer) Enabled() bool { return m.cfg.Host != "" && m.cfg.From != "" }
 
+// SendNow sends in the background without throttling (the caller batches).
+func (m *Mailer) SendNow(to, subject, body string) {
+	if !m.Enabled() || to == "" {
+		return
+	}
+	go func() {
+		if err := m.send(to, subject, body); err != nil {
+			slog.Error("email failed", "to", to, "err", err)
+		} else {
+			slog.Info("email sent", "to", to, "subject", subject)
+		}
+	}()
+}
+
 // Notify sends in the background unless the same key was emailed recently.
 func (m *Mailer) Notify(key, to, subject, body string) {
 	if !m.Enabled() || to == "" {

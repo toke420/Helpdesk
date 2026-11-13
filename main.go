@@ -27,7 +27,10 @@ type Config struct {
 	AdminEmail     string
 	AdminPassword  string
 	SMTP           SMTPConfig
-	AI             AIConfig
+	// When everyone is Away or signed out: ntfy first, else email NotifyEmail.
+	Ntfy        NtfyConfig
+	NotifyEmail string
+	AI          AIConfig
 }
 
 func env(key, def string) string {
@@ -67,6 +70,13 @@ func loadConfig() (Config, error) {
 		return c, fmt.Errorf("HELPDESK_BASE_URL must be a full URL like https://help.example.com")
 	}
 	c.BaseOrigin = u.Scheme + "://" + u.Host
+	if c.Ntfy, err = parseNtfyURL(env("NTFY_URL", "")); err != nil {
+		return c, err
+	}
+	c.Ntfy.Token = env("NTFY_TOKEN", "")
+	if c.NotifyEmail, _ = cleanEmail(env("NOTIFY_EMAIL", "")); c.NotifyEmail == "" && env("NOTIFY_EMAIL", "") != "" {
+		return c, fmt.Errorf("NOTIFY_EMAIL must be a plain email address like orders@example.com")
+	}
 	c.SecureCookies = u.Scheme == "https"
 	for _, o := range strings.Split(env("HELPDESK_ALLOWED_ORIGINS", ""), ",") {
 		if o = strings.TrimRight(strings.TrimSpace(o), "/"); o != "" {
@@ -121,6 +131,9 @@ func run() error {
 	mailer := NewMailer(cfg.SMTP)
 	llm := NewLLM(cfg.AI)
 	app := NewApp(cfg, store, mailer, llm)
+	if err := app.loadAway(ctx); err != nil {
+		return err
+	}
 
 	go func() {
 		t := time.NewTicker(time.Hour)
@@ -148,6 +161,7 @@ func run() error {
 	go func() { errc <- srv.ListenAndServe() }()
 	slog.Info("helpdesk listening", "addr", cfg.Addr, "base_url", cfg.BaseURL,
 		"widget_origins", cfg.AllowedOrigins, "email", mailer.Enabled(),
+		"ntfy", cfg.Ntfy.Enabled(), "notify_email", cfg.NotifyEmail,
 		"ai", llm.Enabled(), "ai_provider", llm.cfg.Provider, "ai_model", llm.cfg.Model)
 
 	select {

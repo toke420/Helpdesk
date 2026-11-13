@@ -379,7 +379,7 @@ func (a *App) shouldAnswer(ctx context.Context, conv *Conversation) bool {
 	switch s["ai_agent"] {
 	case "always":
 	case "away":
-		if a.hub.Active("agents") {
+		if a.pres.anyAvailable() { // nobody available: signed out, or everyone Away
 			return false
 		}
 	default:

@@ -91,7 +91,19 @@ var migrations = [][]string{
 			value TEXT NOT NULL
 		)`,
 	},
-	// 2: case categories and close times, for the Cases page.
+	// 2: Away mode.
+	{
+		// Away mode: an agent who's Away doesn't count as available.
+		`ALTER TABLE agents ADD COLUMN away INTEGER NOT NULL DEFAULT 0`,
+	},
+	// 3: case linking.
+	{
+		// Case linking: a new conversation can follow an earlier case.
+		`ALTER TABLE conversations ADD COLUMN related_id INTEGER`,
+		`ALTER TABLE conversations ADD COLUMN related_via TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX contacts_email ON contacts(email COLLATE NOCASE)`,
+	},
+	// 4: case categories and close times, for the Cases page.
 	{
 		`ALTER TABLE conversations ADD COLUMN category TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE conversations ADD COLUMN closed_at INTEGER`,
@@ -99,7 +111,7 @@ var migrations = [][]string{
 		`CREATE INDEX conversations_created ON conversations(created_at)`,
 		`CREATE INDEX conversations_category ON conversations(category, id)`,
 	},
-	// 3: AI — bot messages, per-case AI state, knowledge base, search indexes.
+	// 5: AI — bot messages, per-case AI state, knowledge base, search indexes.
 	{
 		// SQLite can't alter a CHECK constraint, so rebuild messages to allow 'bot'.
 		`CREATE TABLE messages_new (
@@ -144,7 +156,13 @@ var migrations = [][]string{
 		// Resolved cases, indexed for Copilot (rowid = conversation id). Filled on close.
 		`CREATE VIRTUAL TABLE case_fts USING fts5(text)`,
 	},
-	// 4: Activities — each agent's to-do list, optionally linked to a case.
+	// 6: detailed case states (Awaiting Manufacturer, On Hold, In Progress…).
+	// status stays open/pending/closed so every view and count keeps working;
+	// sub_status narrows it ('' = plain open / pending awaiting the customer).
+	{
+		`ALTER TABLE conversations ADD COLUMN sub_status TEXT NOT NULL DEFAULT ''`,
+	},
+	// 7: Activities — each agent's to-do list, optionally linked to a case.
 	{
 		`CREATE TABLE tasks (
 			id INTEGER PRIMARY KEY,
@@ -204,6 +222,7 @@ type Agent struct {
 	Name      string `json:"name"`
 	Role      string `json:"role"`
 	Disabled  bool   `json:"disabled"`
+	Away      bool   `json:"away"`
 	CreatedAt int64  `json:"created_at"`
 	Online    bool   `json:"online"`
 	hash      string
@@ -224,18 +243,57 @@ type Conversation struct {
 	ID            int64    `json:"id"`
 	ContactID     int64    `json:"contact_id"`
 	Status        string   `json:"status"`
+	SubStatus     string   `json:"sub_status"`
 	AssigneeID    *int64   `json:"assignee_id"`
 	Subject       string   `json:"subject"`
 	Unread        bool     `json:"unread"`
 	CreatedAt     int64    `json:"created_at"`
 	LastMessageAt int64    `json:"last_message_at"`
 	Preview       string   `json:"preview"`
+	Number        string   `json:"number"`
+	RelatedID     *int64   `json:"related_id"`
+	RelatedNumber string   `json:"related_number"`
+	RelatedVia    string   `json:"related_via"`
 	Category      string   `json:"category"`
 	ClosedAt      *int64   `json:"closed_at"`
 	AIState       string   `json:"ai_state"`
 	AIReplies     int      `json:"ai_replies"`
 	MessageCount  int      `json:"message_count,omitempty"`
 	Contact       *Contact `json:"contact,omitempty"`
+}
+
+// Case numbers are what customers and staff see: HD-1001 is conversation 1.
+const caseOffset = 1000
+
+func caseNumber(id int64) string { return fmt.Sprintf("HD-%d", id+caseOffset) }
+
+// parseCaseNumber accepts "HD-1035", "hd 1035", "#1035" or "1035".
+func parseCaseNumber(s string) (int64, bool) {
+	s = strings.ToUpper(strings.Join(strings.Fields(s), ""))
+	s = strings.TrimPrefix(s, "#")
+	s = strings.TrimPrefix(s, "HD")
+	s = strings.TrimLeft(s, "-#")
+	if s == "" || len(s) > 12 {
+		return 0, false
+	}
+	var n int64
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int64(r-'0')
+	}
+	if n <= caseOffset {
+		return 0, false
+	}
+	return n - caseOffset, true
+}
+
+// caseLink says which earlier case a new conversation follows, and how the
+// customer picked it: "number" (typed it in) or "unsure" (their last case).
+type caseLink struct {
+	ID  int64
+	Via string
 }
 
 type Message struct {
@@ -251,11 +309,11 @@ type Message struct {
 
 // ---------- agents ----------
 
-const agentCols = `id, email, name, role, password_hash, disabled, created_at`
+const agentCols = `id, email, name, role, password_hash, disabled, away, created_at`
 
 func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 	a := &Agent{}
-	err := row.Scan(&a.ID, &a.Email, &a.Name, &a.Role, &a.hash, &a.Disabled, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.Email, &a.Name, &a.Role, &a.hash, &a.Disabled, &a.Away, &a.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -361,7 +419,7 @@ func (s *Store) CreateSession(ctx context.Context, tokenHash string, agentID int
 
 func (s *Store) SessionAgent(ctx context.Context, tokenHash string) (*Agent, error) {
 	return scanAgent(s.db.QueryRowContext(ctx,
-		`SELECT a.id, a.email, a.name, a.role, a.password_hash, a.disabled, a.created_at
+		`SELECT a.id, a.email, a.name, a.role, a.password_hash, a.disabled, a.away, a.created_at
 		 FROM sessions s JOIN agents a ON a.id = s.agent_id
 		 WHERE s.token_hash = ? AND s.expires_at > ? AND a.disabled = 0`, tokenHash, nowMs()))
 }
@@ -441,13 +499,13 @@ func (s *Store) UpdateContactProfile(ctx context.Context, id int64, name, email 
 
 // ---------- conversations ----------
 
-const convCols = `c.id, c.contact_id, c.status, c.assignee_id, c.subject, c.unread, c.created_at, c.last_message_at, c.last_message_preview, c.category, c.closed_at, c.ai_state, c.ai_replies`
+const convCols = `c.id, c.contact_id, c.status, c.assignee_id, c.subject, c.unread, c.created_at, c.last_message_at, c.last_message_preview, c.related_id, c.related_via, c.category, c.closed_at, c.ai_state, c.ai_replies, c.sub_status`
 
 // scanConv reads convCols, then the contact's columns when withContact, then
 // any extra destinations.
 func scanConv(row interface{ Scan(...any) error }, withContact bool, extra ...any) (*Conversation, error) {
 	c := &Conversation{}
-	dest := []any{&c.ID, &c.ContactID, &c.Status, &c.AssigneeID, &c.Subject, &c.Unread, &c.CreatedAt, &c.LastMessageAt, &c.Preview, &c.Category, &c.ClosedAt, &c.AIState, &c.AIReplies}
+	dest := []any{&c.ID, &c.ContactID, &c.Status, &c.AssigneeID, &c.Subject, &c.Unread, &c.CreatedAt, &c.LastMessageAt, &c.Preview, &c.RelatedID, &c.RelatedVia, &c.Category, &c.ClosedAt, &c.AIState, &c.AIReplies, &c.SubStatus}
 	var ct Contact
 	if withContact {
 		dest = append(dest, &ct.ID, &ct.Name, &ct.Email, &ct.UserAgent, &ct.LastPage, &ct.CreatedAt, &ct.LastSeenAt)
@@ -461,6 +519,10 @@ func scanConv(row interface{ Scan(...any) error }, withContact bool, extra ...an
 	}
 	if withContact {
 		c.Contact = &ct
+	}
+	c.Number = caseNumber(c.ID)
+	if c.RelatedID != nil {
+		c.RelatedNumber = caseNumber(*c.RelatedID)
 	}
 	return c, nil
 }
@@ -496,10 +558,25 @@ func viewFilter(view string, agentID int64) (string, []any, bool) {
 	return "", nil, false
 }
 
-func (s *Store) ListConversations(ctx context.Context, view string, agentID int64, before int64, limit int) ([]*Conversation, error) {
+func likeEscape(s string) string {
+	return "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s) + "%"
+}
+
+func (s *Store) ListConversations(ctx context.Context, view string, agentID int64, before int64, limit int, q string) ([]*Conversation, error) {
 	where, args, ok := viewFilter(view, agentID)
 	if !ok {
 		return nil, fmt.Errorf("unknown view %q", view)
+	}
+	if q = strings.TrimSpace(q); q != "" {
+		// A search looks through every conversation, whatever the view.
+		like := likeEscape(q)
+		where = `(k.name LIKE ? ESCAPE '\' OR k.email LIKE ? ESCAPE '\' OR c.subject LIKE ? ESCAPE '\'
+			OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.body LIKE ? ESCAPE '\'))`
+		args = []any{like, like, like, like}
+		if id, ok := parseCaseNumber(q); ok {
+			where = `(c.id = ? OR c.related_id = ? OR ` + where + `)`
+			args = append([]any{id, id}, args...)
+		}
 	}
 	if before > 0 {
 		where += ` AND c.last_message_at < ?`
@@ -548,8 +625,9 @@ func preview(body string) string {
 
 // AddContactMessage appends a customer message to one of their cases.
 // targetID picks a case (it must be theirs and not closed); 0 means their
-// latest case. A closed or missing case, or forceNew, starts a new one.
-func (s *Store) AddContactMessage(ctx context.Context, contact *Contact, body string, targetID int64, forceNew bool) (*Conversation, *Message, bool, error) {
+// latest case. A closed or missing case, or forceNew, starts a new one,
+// linked to an earlier case when link is set.
+func (s *Store) AddContactMessage(ctx context.Context, contact *Contact, body string, targetID int64, forceNew bool, link *caseLink) (*Conversation, *Message, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, false, err
@@ -577,9 +655,14 @@ func (s *Store) AddContactMessage(ctx context.Context, contact *Contact, body st
 		}
 	}
 	if convID == 0 {
+		var relID any
+		via := ""
+		if link != nil && link.ID > 0 {
+			relID, via = link.ID, link.Via
+		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO conversations (contact_id, subject, created_at, last_message_at, last_message_preview) VALUES (?, ?, ?, ?, ?)`,
-			contact.ID, preview(body), now, now, preview(body))
+			`INSERT INTO conversations (contact_id, subject, created_at, last_message_at, last_message_preview, related_id, related_via) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			contact.ID, preview(body), now, now, preview(body), relID, via)
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -588,7 +671,7 @@ func (s *Store) AddContactMessage(ctx context.Context, contact *Contact, body st
 	} else {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE conversations SET last_message_at = ?, last_message_preview = ?, unread = 1,
-				status = CASE WHEN status = 'pending' THEN 'open' ELSE status END WHERE id = ?`,
+				status = CASE WHEN status = 'pending' AND sub_status = '' THEN 'open' ELSE status END WHERE id = ?`,
 			now, preview(body), convID); err != nil {
 			return nil, nil, false, err
 		}
@@ -693,10 +776,29 @@ func (s *Store) ListMessages(ctx context.Context, convID int64, includeNotes boo
 	return out, rows.Err()
 }
 
-func (s *Store) SetStatus(ctx context.Context, convID int64, status string) error {
+// CaseStates maps each status an agent can pick to its stored status and
+// sub_status. Agents and customers both see the full state name (caseStateLabel).
+var CaseStates = map[string][2]string{
+	"open":              {"open", ""},
+	"in_progress":       {"open", "in_progress"},
+	"pending":           {"pending", ""}, // awaiting the customer
+	"pending_vendor":    {"pending", "pending_vendor"},
+	"awaiting_approval": {"pending", "awaiting_approval"},
+	"scheduled":         {"pending", "scheduled"},
+	"on_hold":           {"pending", "on_hold"},
+	"closed":            {"closed", ""},
+}
+
+// SetStatus sets a case to one of the CaseStates keys.
+func (s *Store) SetStatus(ctx context.Context, convID int64, state string) error {
+	st, ok := CaseStates[state]
+	if !ok {
+		return fmt.Errorf("unknown case state %q", state)
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE conversations SET status = ?, closed_at = CASE WHEN ? = 'closed' THEN ? ELSE NULL END WHERE id = ?`,
-		status, status, nowMs(), convID)
+		`UPDATE conversations SET status = ?, sub_status = ?,
+			closed_at = CASE WHEN ? = 'closed' THEN ? ELSE NULL END WHERE id = ?`,
+		st[0], st[1], st[0], nowMs(), convID)
 	if err != nil {
 		return err
 	}
@@ -748,10 +850,6 @@ type CaseStats struct {
 	AvgCloseMs int64 `json:"avg_close_ms"`
 }
 
-func likeEscape(s string) string {
-	return "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s) + "%"
-}
-
 func (f CaseFilter) where(me int64) (string, []any, error) {
 	conds, args := []string{"1 = 1"}, []any{}
 	if q := strings.TrimSpace(f.Query); q != "" {
@@ -759,7 +857,7 @@ func (f CaseFilter) where(me int64) (string, []any, error) {
 		search := `(c.subject LIKE ? ESCAPE '\' OR k.name LIKE ? ESCAPE '\' OR k.email LIKE ? ESCAPE '\'
 			OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.body LIKE ? ESCAPE '\')`
 		args = append(args, like, like, like, like)
-		if n, err := strconv.ParseInt(strings.TrimPrefix(q, "#"), 10, 64); err == nil && n > 0 {
+		if n, ok := parseCaseNumber(q); ok {
 			search += ` OR c.id = ?`
 			args = append(args, n)
 		}
@@ -851,9 +949,23 @@ func (s *Store) MarkRead(ctx context.Context, convID int64) error {
 	return err
 }
 
-func (s *Store) ContactConversations(ctx context.Context, contactID int64) ([]*Conversation, error) {
+// ConversationExists reports whether a conversation with this id exists.
+func (s *Store) ConversationExists(ctx context.Context, id int64) (bool, error) {
+	var x int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM conversations WHERE id = ?`, id).Scan(&x)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// ContactConversations lists a customer's cases: this browser's, plus any
+// from other browsers where they gave the same email address.
+func (s *Store) ContactConversations(ctx context.Context, contactID int64, email string) ([]*Conversation, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+convCols+` FROM conversations c WHERE c.contact_id = ? ORDER BY c.id DESC LIMIT 50`, contactID)
+		`SELECT `+convCols+` FROM conversations c JOIN contacts k ON k.id = c.contact_id
+		 WHERE c.contact_id = ? OR (? <> '' AND k.email = ? COLLATE NOCASE)
+		 ORDER BY c.id DESC LIMIT 50`, contactID, email, email)
 	if err != nil {
 		return nil, err
 	}
@@ -876,7 +988,7 @@ var defaultSettings = map[string]string{
 	"accent_color":    "#2f6fed",
 	"greeting":        "Hi there! Ask us anything — we usually reply within a few minutes.",
 	"offline_message": "We're away right now. Leave a message and your email, and we'll reply by email.",
-	"categories":      "Account & access\nHardware\nNetwork & VPN\nSoftware\nEmail\nOther",
+	"categories":      "Account & access\nHardware\nNetwork & VPN\nSoftware\nEmail\nWeb Hosting\nSales Lead\nInfrastructure\nProcurement\nGeneral Troubleshooting\nOther",
 	// AI agent: off | away (only when no agent is signed in) | always
 	"ai_agent":           "off",
 	"ai_bot_name":        "AI assistant",
@@ -929,6 +1041,31 @@ func (s *Store) PutSettings(ctx context.Context, vals map[string]string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// ---------- away mode ----------
+
+func (s *Store) SetAway(ctx context.Context, agentID int64, away bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET away = ? WHERE id = ?`, away, agentID)
+	return err
+}
+
+// AwayAgents returns the ids of agents currently set to Away.
+func (s *Store) AwayAgents(ctx context.Context) (map[int64]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM agents WHERE away = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
 }
 
 // Backup writes a consistent copy of the database to path.

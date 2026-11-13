@@ -20,9 +20,70 @@ const state = {
   mode: 'reply',
   drafts: {},
   live: false,
+  ntfyEnabled: false,
+  notifyEmail: '',
+  q: '',
   myTasks: [],         // my open tasks (plus today's finished ones) — drives the Activities badge
   caseTasks: [],       // tasks linked to the open conversation
 };
+
+// ---------- this device: presence + sound ----------
+// Each open inbox tells the server whether it's on screen, so it knows whether
+// anyone will hear the chime or whether to send ntfy / email instead.
+const CLIENT_ID = (crypto.randomUUID?.() || String(Math.random()).slice(2)) ;
+const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+  (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+const visibleNow = () => document.visibilityState === 'visible';
+
+function reportPresence() {
+  if (!state.me) return;
+  fetch('/api/me/presence', {
+    method: 'POST', keepalive: true, credentials: 'same-origin',
+    headers: { 'X-Helpdesk': '1', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client: CLIENT_ID, visible: visibleNow() }),
+  }).catch(() => {});
+}
+
+const sound = {
+  get on() { try { return localStorage.getItem('hd_sound') !== 'off'; } catch { return true; } },
+  set on(v) { try { localStorage.setItem('hd_sound', v ? 'on' : 'off'); } catch { } },
+  ctx: null,
+};
+// Browsers only allow audio after the user has interacted with the page.
+function unlockAudio() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  if (!sound.ctx) sound.ctx = new AC();
+  if (sound.ctx.state === 'suspended') sound.ctx.resume().catch(() => {});
+}
+['pointerdown', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, unlockAudio, { passive: true }));
+
+function chime(force) {
+  if ((!sound.on && !force) || !sound.ctx || sound.ctx.state !== 'running') return false;
+  const ctx = sound.ctx, t = ctx.currentTime;
+  for (const [i, f] of [[0, 880], [1, 1318.5]]) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.value = f;
+    const s = t + i * 0.16;
+    g.gain.setValueAtTime(0.0001, s);
+    g.gain.exponentialRampToValueAtTime(0.35, s + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, s + 0.45);
+    o.connect(g).connect(ctx.destination);
+    o.start(s);
+    o.stop(s + 0.5);
+  }
+  return true;
+}
+
+async function setAway(away) {
+  try {
+    const r = await api('PUT', '/api/me/away', { away });
+    state.me.away = r.agent.away;
+    renderSidebar();
+    toast(away ? 'You\'re Away' : 'You\'re available');
+  } catch (ex) { toast(ex.message); }
+}
 const els = {};
 
 const VIEWS = [
@@ -57,7 +118,34 @@ function fill(el, ...kids) {
   el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false));
 }
 
-const ICON_LOGO = '<svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-3 2.5V11H2z" fill="white"/></svg>';
+const ICON_LOGO = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 11h14v9h-8l-4 3v-3H9z" fill="white"/></svg>';
+const svg = (paths) => `<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const ICON = {
+  bell: svg('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'),
+  bellOff: svg('<path d="M8.7 3A6 6 0 0 1 18 8c0 2.8.6 4.7 1.3 6"/><path d="M17 17H3s3-2 3-9a4.7 4.7 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>'),
+  moon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'),
+  sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
+  search: svg('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'),
+  link: svg('<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>'),
+  check: svg('<path d="M20 6 9 17l-5-5"/>'),
+  menu: svg('<path d="M4 6h16M4 12h16M4 18h16"/>'),
+  back: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
+};
+
+// ---------- light / dark ----------
+const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
+function isDark() {
+  const t = document.documentElement.getAttribute('data-theme');
+  return t ? t === 'dark' : darkMQ.matches;
+}
+function setTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  try { localStorage.setItem('hd_theme', t); } catch { }
+  renderSidebar();
+}
+darkMQ.addEventListener?.('change', () => renderSidebar());
+
+const RELATED_HOW = { number: 'customer entered it', unsure: 'customer wasn\'t sure, matched last case' };
 
 // ---------- API ----------
 class ApiError extends Error {}
@@ -99,11 +187,14 @@ function initials(name) {
 }
 function avatar(name, seed, opts = {}) {
   return h('div', {
-    class: 'avatar' + (opts.sm ? ' sm' : ''),
+    class: 'avatar' + (opts.sm ? ' sm' : '') + (opts.lg ? ' lg' : ''),
     style: `background:hsl(${hue(seed ?? name)} 55% 48%)`,
     title: name,
   }, initials(name), opts.online ? h('span', { class: 'dot', title: 'On the site now' }) : null);
 }
+// Case numbers as customers see them (store.go caseNumber: HD-<id+1000>).
+const caseNo = (id) => 'HD-' + (Number(id) + 1000);
+
 function contactName(c) {
   return c?.name || c?.email || `Visitor #${c?.id}`;
 }
@@ -140,6 +231,22 @@ function clipText(s, n) {
   s = String(s || '');
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
+// Case states an agent can pick: [key, label, short pill text]. The server
+// stores status (open/pending/closed) plus sub_status; customers only see status.
+const STATUS_OPTIONS = [
+  ['open', 'Open', 'open'],
+  ['in_progress', 'In Progress', 'in progress'],
+  ['pending', 'Awaiting Customer', 'awaiting customer'],
+  ['pending_vendor', 'Awaiting Manufacturer', 'awaiting manufacturer'],
+  ['awaiting_approval', 'Awaiting Approval', 'awaiting approval'],
+  ['scheduled', 'Scheduled', 'scheduled'],
+  ['on_hold', 'On Hold', 'on hold'],
+  ['closed', 'Closed', 'closed'],
+];
+const statusKey = (c) => c.sub_status || c.status;
+const statusInfo = (c) => STATUS_OPTIONS.find(o => o[0] === statusKey(c)) || [c.status, c.status, c.status];
+const statusPill = (c) => h('span', { class: 'pill ' + c.status }, statusInfo(c)[2]);
+
 function categories() {
   return String(state.settings.categories || '').split('\n').map(s => s.trim()).filter(Boolean);
 }
@@ -193,6 +300,7 @@ async function route() {
   if (r.kind === 'view') {
     state.view = r.view;
     state.conv = null;
+    if (state.q) { state.q = ''; if (els.search) els.search.value = ''; }
     renderSidebar();
     renderThread();
     await loadList();
@@ -222,6 +330,7 @@ function renderLogin() {
       }
     },
   },
+    h('div', { class: 'logo', html: ICON_LOGO }),
     h('h1', {}, 'Sign in'),
     h('p', {}, 'Agent inbox'),
     h('label', { class: 'field' }, 'Email', email),
@@ -295,11 +404,14 @@ function renderSidebar() {
       label,
       key !== 'closed' && n ? h('span', { class: 'count' + (key === 'unassigned' && n ? ' hot' : '') }, n) : null);
   });
+  const away = !!state.me.away;
+  const dark = isDark();
   // A live update can redraw the menu while someone is using it: keep their place.
   const focused = els.sidebar.contains(document.activeElement)
     ? (document.activeElement.getAttribute('href') || '.' + [...document.activeElement.classList].join('.')) : null;
-  fill(els.sidebar, 
-    h('div', { class: 'brand' }, h('span', { class: 'logo', html: ICON_LOGO }), h('span', { class: 'brand-name' }, state.settings.brand_name || 'Help Desk'),
+  els.sidebar.replaceChildren(
+    h('div', { class: 'brand' }, h('span', { class: 'logo', html: ICON_LOGO }),
+      h('div', { class: 'brand-name' }, h('div', { class: 'bn' }, state.settings.brand_name || 'Help Desk'), h('div', { class: 'bs' }, 'Help desk')),
       h('button', { type: 'button', class: 'btn ghost drawer-close', 'aria-label': 'Close menu', onclick: () => setDrawer(false, { restoreFocus: true }) }, '✕')),
     ...items,
     h('div', { class: 'nav-sep' }),
@@ -308,16 +420,38 @@ function renderSidebar() {
     h('a', { class: 'nav-item' + (route.kind === 'knowledge' ? ' active' : ''), href: '#/knowledge' }, 'Knowledge'),
     h('a', { class: 'nav-item' + (route.kind === 'settings' ? ' active' : ''), href: '#/settings' }, 'Settings'),
     h('div', { class: 'spacer' }),
+    h('div', { class: 'away-toggle', role: 'group', 'aria-label': 'Your status' },
+      h('button', { type: 'button', class: !away ? 'on' : '', 'aria-pressed': String(!away), onclick: () => away && setAway(false) }, h('span', { class: 'd' }), 'Available'),
+      h('button', { type: 'button', class: away ? 'on' : '', 'aria-pressed': String(away), onclick: () => !away && setAway(true) }, h('span', { class: 'd away' }), 'Away')),
+    h('p', { class: 'status-hint' }, away
+      ? 'New chats go to ntfy, then email if that fails.'
+      : 'You\'ll hear a chime for new messages.'),
     h('div', { class: 'me' },
       avatar(state.me.name, state.me.id, { sm: true }),
       h('div', { class: 'who' },
         h('div', {}, state.me.name),
-        h('div', { class: 'small muted' }, state.live ? 'Online' : 'Reconnecting…')),
-      h('span', { class: 'conn' + (state.live ? ' live' : ''), title: state.live ? 'Live updates on' : 'Reconnecting' })),
+        h('div', { class: 'small muted' },
+          h('span', { class: 'conn' + (state.live ? (away ? ' away' : ' live') : '') }),
+          !state.live ? 'Reconnecting…' : away ? 'Away' : 'Available')),
+      h('button', {
+        class: 'icon-btn', type: 'button', html: sound.on ? ICON.bell : ICON.bellOff,
+        title: sound.on ? 'Sound on' : 'Sound off',
+        'aria-label': sound.on ? 'Mute new-message sound' : 'Turn on new-message sound',
+        'aria-pressed': String(sound.on),
+        onclick: () => { sound.on = !sound.on; unlockAudio(); if (sound.on) chime(true); renderSidebar(); },
+      }),
+      h('button', {
+        class: 'icon-btn', type: 'button', html: dark ? ICON.sun : ICON.moon,
+        title: dark ? 'Light theme' : 'Dark theme',
+        'aria-label': dark ? 'Switch to light theme' : 'Switch to dark theme',
+        onclick: () => setTheme(dark ? 'light' : 'dark'),
+      })),
   );
-  if (focused) {
-    const el = focused.startsWith('#') ? els.sidebar.querySelector(`a[href="${CSS.escape(focused)}"]`) : els.sidebar.querySelector(focused);
-    el?.focus({ preventScroll: true });
+  if (focused && focused !== '.') {
+    try {
+      const el = focused.startsWith('#') ? els.sidebar.querySelector(`a[href="${CSS.escape(focused)}"]`) : els.sidebar.querySelector(focused);
+      el?.focus({ preventScroll: true });
+    } catch { /* not a usable selector: leave focus alone */ }
   }
   const n = attention();
   document.querySelectorAll('.menu-btn').forEach(b => {
@@ -331,7 +465,7 @@ function renderSidebar() {
 async function loadList() {
   try {
     const [list, counts] = await Promise.all([
-      api('GET', `/api/conversations?view=${state.view}`),
+      api('GET', `/api/conversations?view=${state.view}` + (state.q ? `&q=${encodeURIComponent(state.q)}` : '')),
       api('GET', '/api/conversations/counts'),
     ]);
     state.convs = list.conversations;
@@ -354,37 +488,54 @@ const inPage = () => !!els.shell?.classList.contains('page-mode');
 
 function renderList() {
   if (!els.list || inPage()) return;
-  const label = VIEWS.find(v => v[0] === state.view)?.[1] || 'Open';
+  const label = state.q ? 'Search' : (VIEWS.find(v => v[0] === state.view)?.[1] || 'Open');
   const body = h('div', { class: 'list-body' });
   if (!state.convs.length) {
     body.append(h('div', { class: 'empty' },
-      h('strong', {}, state.view === 'open' ? 'Inbox zero' : 'Nothing here'),
-      state.view === 'open' ? 'New chats from your website will appear here.' : 'No conversations in this view.'));
+      state.q ? h('strong', {}, 'No matches')
+        : h('strong', {}, state.view === 'open' ? 'Inbox zero' : 'Nothing here'),
+      state.q ? 'Try a case number like HD-1035, a name, an email or words from the chat.'
+        : state.view === 'open' ? 'New chats from your website will appear here.' : 'No conversations in this view.'));
   }
   for (const c of state.convs) {
     const name = contactName(c.contact);
     const assignee = c.assignee_id ? agentName(c.assignee_id) : null;
     body.append(h('a', {
       class: 'conv' + (c.unread ? ' unread' : '') + (state.conv?.id === c.id ? ' active' : ''),
-      href: `#/c/${c.id}`,
+      href: `#/c/${c.id}`, 'aria-current': state.conv?.id === c.id ? 'true' : null,
     },
       avatar(name, c.contact_id, { online: c.contact.online }),
       h('div', { style: 'min-width:0' },
         h('div', { class: 'top' }, h('span', { class: 'name' }, name), h('span', { class: 'time' }, relTime(c.last_message_at))),
         h('div', { class: 'preview' }, c.preview || c.subject),
         h('div', { class: 'meta' },
-          h('span', { class: 'small faint' }, `#${c.id}`),
-          c.status !== 'open' ? h('span', { class: 'pill ' + c.status }, c.status) : null,
+          statusPill(c),
           c.category ? h('span', { class: 'pill cat' }, c.category) : null,
           c.ai_state === 'active' && c.status !== 'closed' ? h('span', { class: 'pill ai' }, '✦ AI') : null,
           c.ai_state === 'handoff' && c.status !== 'closed' ? h('span', { class: 'pill pending' }, 'from AI') : null,
-          h('span', { class: 'small faint' }, assignee || 'Unassigned'),
-        ),
+          h('span', {}, `${c.number} · ${assignee || 'Unassigned'}`),
+          c.unread ? h('span', { class: 'unread-dot', 'aria-label': 'Unread' }) : null),
       ),
     ));
   }
-  fill(els.list, 
-    h('div', { class: 'list-head' }, menuButton(), h('h2', {}, label)),
+  // Keep the search box (and its focus) when the list refreshes.
+  if (!els.search) {
+    let timer;
+    els.search = h('input', {
+      type: 'search', placeholder: 'Search case #, name, email or message', 'aria-label': 'Search conversations',
+      oninput: (e) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { state.q = e.target.value.trim(); loadList(); }, 250);
+      },
+      onkeydown: (e) => { if (e.key === 'Escape') { e.target.value = ''; state.q = ''; loadList(); } },
+    });
+    els.searchBox = h('label', { class: 'search' }, h('span', { html: ICON.search, style: 'display:grid' }), els.search);
+  }
+  els.list.replaceChildren(
+    h('div', { class: 'list-head' },
+      h('div', { class: 'row' }, menuButton(), h('h2', {}, label),
+        h('span', { class: 'n' }, `${state.convs.length}${state.convs.length === 50 ? '+' : ''} ${state.convs.length === 1 ? 'conversation' : 'conversations'}`)),
+      els.searchBox),
     body,
   );
 }
@@ -428,7 +579,7 @@ function renderThread() {
   }
   els.head = h('div', { class: 'thread-head' });
   els.messages = h('div', { class: 'messages', role: 'log', 'aria-live': 'polite' });
-  fill(els.thread, els.head, els.messages, renderComposer());
+  els.thread.replaceChildren(els.head, els.messages, h('div', { class: 'composer-wrap' }, renderComposer()));
   renderThreadHead();
   renderMessages();
   renderDetails();
@@ -463,26 +614,27 @@ function renderThreadHead() {
     (conv.category && !cats.includes(conv.category) ? [conv.category, ...cats] : cats)
       .map(c => h('option', { value: c, selected: c === conv.category }, c)));
 
-  const setStatus = (s) => async () => {
-    try { await api('POST', `/api/conversations/${conv.id}/status`, { status: s }); }
-    catch (ex) { toast(ex.message); }
-  };
-  const actions = conv.status === 'closed'
-    ? [h('button', { class: 'btn', onclick: setStatus('open') }, 'Reopen')]
-    : [
-      conv.status === 'pending'
-        ? h('button', { class: 'btn', onclick: setStatus('open') }, 'Reopen')
-        : h('button', { class: 'btn', onclick: setStatus('pending'), title: 'Waiting on the customer' }, 'Pending'),
-      h('button', { class: 'btn primary', onclick: setStatus('closed') }, 'Close'),
-    ];
-  fill(els.head, 
+  const statusSel = h('select', {
+    class: 'input status-select', 'aria-label': 'Case status',
+    onchange: async (e) => {
+      try { await api('POST', `/api/conversations/${conv.id}/status`, { status: e.target.value }); }
+      catch (ex) { toast(ex.message); e.target.value = statusKey(conv); }
+    },
+  }, STATUS_OPTIONS.map(([v, t]) => h('option', { value: v, selected: v === statusKey(conv) }, t)));
+  const actions = [statusSel];
+  els.head.replaceChildren(
     h('div', { class: 'th-top' },
-      h('a', { class: 'btn ghost back', href: `#/view/${state.view}`, 'aria-label': 'Back to list' }, '←'),
+      h('a', { class: 'btn ghost back', href: `#/view/${state.view}`, 'aria-label': 'Back to list', html: ICON.back }),
       h('div', { class: 'title' },
-        h('div', {}, contactName(conv.contact)),
+        h('div', { class: 'line' },
+          h('span', { class: 'nm' }, contactName(conv.contact)),
+          h('span', { class: 'case-chip' }, `Case ${conv.number}`),
+          conv.related_id ? h('a', { class: 'rel-chip', href: `#/c/${conv.related_id}`, title: 'Open the earlier case' },
+            h('span', { html: ICON.link, style: 'display:grid' }),
+            `Follows ${conv.related_number}` + (RELATED_HOW[conv.related_via] ? ` · ${RELATED_HOW[conv.related_via]}` : '')) : null),
         h('div', { class: 'small muted' },
-          h('span', { class: 'pill ' + conv.status }, conv.status), ' ',
-          `Case #${conv.id}`, conv.contact.online ? ' · On the site now' : '')),
+          statusPill(conv), ' ',
+          conv.contact.online ? 'On the site now' : (conv.contact.email || 'No email yet'))),
       ...actions),
     h('div', { class: 'th-meta' },
       h('label', {}, h('span', {}, 'Category'), category),
@@ -533,7 +685,7 @@ function renderMessages() {
   for (const m of state.messages) {
     const d = new Date(m.created_at).toDateString();
     if (d !== lastDay) {
-      nodes.push(h('div', { class: 'day' }, dayLabel(m.created_at)));
+      nodes.push(h('div', { class: 'day' }, h('span', {}, dayLabel(m.created_at))));
       lastDay = d;
     }
     nodes.push(messageEl(m));
@@ -548,7 +700,7 @@ function appendMessage(m) {
   const prev = state.messages[state.messages.length - 1];
   state.messages.push(m);
   if (!prev || new Date(prev.created_at).toDateString() !== new Date(m.created_at).toDateString()) {
-    els.messages.append(h('div', { class: 'day' }, dayLabel(m.created_at)));
+    els.messages.append(h('div', { class: 'day' }, h('span', {}, dayLabel(m.created_at))));
   }
   els.messages.append(messageEl(m));
   if (nearBottom || m.author_type === 'agent') els.messages.scrollTop = els.messages.scrollHeight;
@@ -603,7 +755,7 @@ function renderComposer() {
     fill(sourcesEl, h('span', { class: 'faint' }, 'Copilot used: '),
       ...src.flatMap((s, i) => [i ? h('span', { class: 'faint' }, ' · ') : null,
         h('a', { href: s.type === 'article' ? `#/knowledge/${s.id}` : `#/c/${s.id}`, title: s.title },
-          s.type === 'article' ? `📄 ${clipText(s.title, 40)}` : `Case #${s.id}`)]).filter(Boolean));
+          s.type === 'article' ? `📄 ${clipText(s.title, 40)}` : `Case ${caseNo(s.id)}`)]).filter(Boolean));
   }
   const copilotBar = state.ai?.enabled && state.mode === 'reply'
     ? h('div', { class: 'copilot-bar' },
@@ -659,14 +811,14 @@ function renderDetails() {
   const conv = state.conv;
   if (!conv || !els.details) return;
   const c = conv.contact;
-  fill(els.details, 
-    h('h3', {}, 'Customer'),
-    h('div', { style: 'display:flex;gap:10px;align-items:center;margin-bottom:12px' },
-      avatar(contactName(c), c.id, { online: c.online }),
-      h('div', { style: 'min-width:0' },
-        h('div', { style: 'font-weight:600' }, contactName(c)),
-        h('div', { class: 'small muted' }, c.online ? 'On the site now' : `Last seen ${relTime(c.last_seen_at)} ago`.replace('now ago', 'just now')))),
+  els.details.replaceChildren(...[ // filter: replaceChildren would print null
+    h('div', { class: 'who' },
+      avatar(contactName(c), c.id, { online: c.online, lg: true }),
+      h('div', { class: 'nm' }, contactName(c)),
+      h('div', { class: 'small muted' }, c.online ? 'On the site now' : `Last seen ${relTime(c.last_seen_at)} ago`.replace('now ago', 'just now'))),
     h('dl', { class: 'kv' },
+      h('dt', {}, 'Case'), h('dd', { style: 'font-variant-numeric:tabular-nums;font-weight:600' }, conv.number),
+      conv.related_id ? [h('dt', {}, 'Follows'), h('dd', {}, h('a', { href: `#/c/${conv.related_id}` }, conv.related_number))] : null,
       h('dt', {}, 'Email'), h('dd', {}, c.email ? h('a', { href: `mailto:${c.email}` }, c.email) : h('span', { class: 'faint' }, 'Not given')),
       h('dt', {}, 'Page'), h('dd', {}, c.last_page && /^https?:\/\//.test(c.last_page)
         ? h('a', { href: c.last_page, target: '_blank', rel: 'noopener noreferrer' }, c.last_page.replace(/^https?:\/\//, ''))
@@ -676,17 +828,18 @@ function renderDetails() {
     ),
     h('h3', {}, `Cases (${state.history.length})`),
     h('div', { class: 'history' },
-      state.history.slice(0, 8).map(x => h('a', { href: `#/c/${x.id}`, class: x.id === conv.id ? 'current' : '' },
-        h('div', { style: 'display:flex;gap:6px;align-items:center' },
-          h('span', { class: 'small faint' }, `#${x.id}`),
-          h('span', { class: 'pill ' + x.status }, x.status),
-          h('span', { class: 'small faint', style: 'margin-left:auto' }, shortDate(x.created_at))),
-        h('div', { class: 'small', style: 'margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, x.subject)))),
+      state.history.slice(0, 8).map(x => h('a', { href: `#/c/${x.id}`, class: x.id === conv.id ? 'current' : '', 'aria-current': x.id === conv.id ? 'true' : null },
+        h('div', { class: 'r' },
+          h('b', {}, x.number),
+          statusPill(x),
+          h('span', { class: 't' }, relTime(x.last_message_at))),
+        h('div', { class: 's' }, x.subject)))),
+    state.history.length > 1 ? h('p', { class: 'small muted' }, 'Includes cases from other devices where they gave the same email.') : null,
     h('a', { class: 'small', href: `#/cases?contact=${c.id}`, style: 'display:inline-block;margin-top:8px' },
       state.history.length > 8 ? `See all ${state.history.length} cases →` : 'Open in case history →'),
     caseTasksPanel(conv),
     state.ai?.enabled ? copilotPanel(conv) : null,
-  );
+  ].filter(Boolean));
 }
 
 // copilotPanel: case summary, and turning a resolved case into a knowledge article.
@@ -725,10 +878,12 @@ function copilotPanel(conv) {
 let es = null;
 function startStream() {
   stopStream();
-  es = new EventSource('/api/stream');
+  const q = new URLSearchParams({ client: CLIENT_ID, mobile: IS_MOBILE ? '1' : '0', visible: visibleNow() ? '1' : '0' });
+  es = new EventSource('/api/stream?' + q);
   es.onopen = () => {
     const wasDown = !state.live;
     state.live = true;
+    reportPresence(); // the stream URL's "visible" may be stale after a reconnect
     renderSidebar();
     if (wasDown) { scheduleRefresh(); loadMyTasks(); if (state.conv) openConversation(state.conv.id); if (actsActive()) loadActs(); }
   };
@@ -750,6 +905,7 @@ function handleEvent({ type, data }) {
   const conv = state.conv;
   switch (type) {
     case 'message':
+      if (data.author_type === 'contact') chime();
       if (conv && data.conversation_id === conv.id && els.messages) {
         appendMessage(data);
         if (data.author_type === 'contact' && document.visibilityState === 'visible') {
@@ -788,6 +944,11 @@ function handleEvent({ type, data }) {
     case 'read':
       scheduleRefresh();
       break;
+    case 'agent':
+      // Away / Available changed (possibly from another device).
+      if (state.me && data.id === state.me.id) { state.me.away = data.away; renderSidebar(); }
+      { const a = state.agents.find(x => x.id === data.id); if (a) a.away = data.away; }
+      break;
     case 'task':
       applyTask(data);
       break;
@@ -799,6 +960,16 @@ function handleEvent({ type, data }) {
       break;
   }
 }
+
+document.addEventListener('visibilitychange', reportPresence);
+window.addEventListener('pagehide', () => {
+  if (!state.me) return;
+  fetch('/api/me/presence', {
+    method: 'POST', keepalive: true, credentials: 'same-origin',
+    headers: { 'X-Helpdesk': '1', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client: CLIENT_ID, visible: false }),
+  }).catch(() => {});
+});
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && state.conv?.unread) {
@@ -830,16 +1001,17 @@ async function renderSettings() {
     state.settings = s.settings;
   } catch { return; }
   const isAdmin = state.me.role === 'admin';
-  fill(main, 
+  main.replaceChildren(...[ // filter: replaceChildren would print null
     h('div', { style: 'display:flex;align-items:center;gap:8px' }, menuButton(), h('h1', {}, 'Settings')),
     h('p', {}, isAdmin ? 'Set up the chat widget, your team and backups.' : 'Your account and team.'),
     isAdmin ? widgetCard() : null,
+    notificationsCard(isAdmin),
     isAdmin ? aiCard() : null,
     isAdmin ? categoriesCard() : null,
     teamCard(isAdmin),
     accountCard(),
     isAdmin ? opsCard() : null,
-  );
+  ].filter(Boolean));
 }
 
 function widgetCard() {
@@ -868,7 +1040,7 @@ function widgetCard() {
       h('label', { class: 'field' }, 'Name shown in the widget', f.brand_name),
       h('label', { class: 'field' }, 'Accent colour', h('div', { class: 'swatch' }, picker, f.accent_color))),
     h('label', { class: 'field' }, 'Greeting', h('span', { class: 'hint' }, 'Shown when your team is online.'), f.greeting),
-    h('label', { class: 'field' }, 'Away message', h('span', { class: 'hint' }, 'Shown when nobody is signed in to the inbox.'), f.offline_message),
+    h('label', { class: 'field' }, 'Away message', h('span', { class: 'hint' }, 'Shown when everyone is Away or signed out.'), f.offline_message),
     err,
     h('button', {
       class: 'btn primary', onclick: async () => {
@@ -882,6 +1054,53 @@ function widgetCard() {
       },
     }, 'Save widget settings'),
   );
+}
+
+function notificationsCard(isAdmin) {
+  const result = h('div', { class: 'small muted', role: 'status', style: 'margin-top:8px' });
+  const soundBtn = h('button', {
+    class: 'btn', type: 'button', onclick: () => {
+      sound.on = !sound.on;
+      unlockAudio();
+      if (sound.on) chime(true);
+      renderSettings();
+    },
+  }, sound.on ? 'Mute on this device' : 'Turn sound on');
+  const off = h('span', { class: 'faint' }, 'not set up');
+  return h('section', { class: 'card' },
+    h('h2', {}, 'Notifications'),
+    h('p', {}, 'When a customer writes in the chat:'),
+    h('ul', { class: 'small', style: 'margin:0 0 14px;padding-left:18px;line-height:1.7' },
+      h('li', {}, h('strong', {}, 'Someone is Available'), ' (inbox open, not set to Away): the inbox plays a sound.'),
+      h('li', {}, h('strong', {}, 'Everyone is Away or signed out'), ': a notification is sent with ntfy ',
+        state.ntfyEnabled ? h('span', { style: 'color:var(--good)' }, '(on)') : off, '.'),
+      h('li', {}, 'If ntfy isn\'t set up or fails, the message is emailed to ',
+        state.notifyEmail && state.emailEnabled ? h('strong', {}, state.notifyEmail) : off,
+        '. Lines sent within a minute arrive as one email, and no email is sent if someone replies first.')),
+    h('p', { class: 'small muted' },
+      'A phone with the inbox open in the background counts as Away, because it can\'t play the sound. Set yourself to Away when you step away from the desk.'),
+    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+      soundBtn,
+      h('button', {
+        class: 'btn', type: 'button', onclick: () => {
+          unlockAudio();
+          if (!chime(true)) toast('Click anywhere on the page first, then try again');
+        },
+      }, 'Play test sound'),
+      isAdmin ? h('button', {
+        class: 'btn', type: 'button', onclick: async (e) => {
+          e.target.disabled = true;
+          result.textContent = 'Sending…';
+          try {
+            const r = await api('POST', '/api/admin/notify-test');
+            result.textContent = `ntfy: ${r.ntfy} · email: ${r.email}`;
+          } catch (ex) { result.textContent = ex.message; }
+          e.target.disabled = false;
+        },
+      }, 'Send test ntfy + email') : null),
+    result,
+    isAdmin ? h('p', { class: 'small muted', style: 'margin-top:12px' },
+      'Set NTFY_URL (and NTFY_TOKEN for a protected topic) and NOTIFY_EMAIL in the server\'s .env, then restart.') : null);
 }
 
 function aiCard() {
@@ -949,12 +1168,12 @@ async function renderKnowledge() {
           h('span', { class: 'c-title' }, a.title),
           h('span', { class: 'c-preview' }, a.snippet)),
         h('span', {}, a.published ? h('span', { class: 'pill open' }, 'AI agent can use') : h('span', { class: 'pill' }, 'Internal only')),
-        h('span', { class: 'c-opened' }, a.source_case ? `From case #${a.source_case} · ` : '', `Updated ${shortDate(a.updated_at)}`)))));
+        h('span', { class: 'c-opened' }, a.source_case ? `From case ${caseNo(a.source_case)} · ` : '', `Updated ${shortDate(a.updated_at)}`)))));
     } catch (ex) {
       if (my === seq) fill(list, h('div', { class: 'empty' }, ex.message));
     }
   }
-  fill(main, 
+  main.replaceChildren(...[ // filter: replaceChildren would print null
     h('div', { class: 'cases-top' },
       h('div', { style: 'display:flex;align-items:center;gap:8px' }, menuButton(), h('h1', { style: 'flex:1' }, 'Knowledge'),
         h('a', { class: 'btn primary', href: '#/knowledge/new' }, '+ New article')),
@@ -965,7 +1184,7 @@ async function renderKnowledge() {
         class: 'input', type: 'search', placeholder: 'Search articles…', 'aria-label': 'Search articles',
         oninput: (e) => { clearTimeout(timer); timer = setTimeout(() => load(e.target.value.trim()), 250); },
       }))),
-    list);
+    list].filter(Boolean));
   load('');
 }
 
@@ -1006,7 +1225,7 @@ async function renderArticleEditor(id) {
     h('div', { class: 'cases-top' },
       h('a', { class: 'small', href: '#/knowledge' }, '← Knowledge'),
       h('h1', { style: 'margin-top:6px' }, id === 'new' ? 'New article' : 'Edit article'),
-      art.source_case ? h('p', {}, 'Drafted by Copilot from ', h('a', { href: `#/c/${art.source_case}` }, `case #${art.source_case}`), '. Check the steps are right and nothing personal slipped in before saving.') : h('p', {}, 'Write it the way you\'d explain it to a customer: the problem in a line, then the steps.')),
+      art.source_case ? h('p', {}, 'Drafted by Copilot from ', h('a', { href: `#/c/${art.source_case}` }, `case ${caseNo(art.source_case)}`), '. Check the steps are right and nothing personal slipped in before saving.') : h('p', {}, 'Write it the way you\'d explain it to a customer: the problem in a line, then the steps.')),
     h('section', { class: 'card kb-editor' },
       h('label', { class: 'field' }, 'Title', title),
       h('label', { class: 'field' }, 'Article', h('span', { class: 'hint' }, 'Plain text. Numbered steps work well.'), body),
@@ -1095,7 +1314,7 @@ async function renderCases(params) {
   const set = (k) => (e) => { f[k] = e.target.value; syncUrl(); load(false); };
   let searchTimer;
   const search = h('input', {
-    class: 'input', type: 'search', placeholder: 'Search case #, subject, customer or any message…',
+    class: 'input', type: 'search', placeholder: 'Search case number (HD-1035), subject, customer or any message…',
     'aria-label': 'Search cases', value: f.q,
     oninput: (e) => {
       clearTimeout(searchTimer);
@@ -1151,7 +1370,7 @@ async function renderCases(params) {
     // Customer scope chip (from the details panel link).
     if (f.contact) {
       const who = data.rows[0]?.contact;
-      fill(scopeEl, h('div', { class: 'scope' },
+      scopeEl.replaceChildren(h('div', { class: 'scope' },
         'Showing cases from ', h('strong', {}, who ? contactName(who) : `customer #${f.contact}`),
         who?.email && who.name ? h('span', { class: 'muted' }, ` · ${who.email}`) : null,
         h('button', {
@@ -1176,13 +1395,13 @@ async function renderCases(params) {
       } else if (f.group === 'category') {
         add(c.category || '￿', c.category || 'No category', '', c);
       } else {
-        add(c.status, { open: 'Open', pending: 'Pending', closed: 'Closed' }[c.status], '', c);
+        add(statusKey(c), statusInfo(c)[1], '', c);
       }
     }
     let list = [...groups.values()];
     if (f.group === 'month') list.sort((a, b) => b.rows[0].created_at - a.rows[0].created_at);
     if (f.group === 'category') list.sort((a, b) => b.rows.length - a.rows.length || (a.label === 'No category') - (b.label === 'No category'));
-    if (f.group === 'status') list.sort((a, b) => ['Open', 'Pending', 'Closed'].indexOf(a.label) - ['Open', 'Pending', 'Closed'].indexOf(b.label));
+    if (f.group === 'status') { const order = STATUS_OPTIONS.map(o => o[1]); list.sort((a, b) => order.indexOf(a.label) - order.indexOf(b.label)); }
     return list;
   }
 
@@ -1192,7 +1411,7 @@ async function renderCases(params) {
       ? h('span', {}, `Closed in ${duration(c.closed_at - c.created_at)}`)
       : h('span', { class: c.status === 'open' ? 'age-open' : '' }, `Open ${duration(Date.now() - c.created_at)}`);
     return h('a', { class: 'case-row', href: `#/c/${c.id}` },
-      h('span', { class: 'c-id' }, `#${c.id}`),
+      h('span', { class: 'c-id' }, c.number),
       h('span', { class: 'c-subject' },
         h('span', { class: 'c-title' }, c.subject || '(no subject)'),
         h('span', { class: 'c-preview' }, c.preview && c.preview !== c.subject ? c.preview : '')),
@@ -1200,7 +1419,7 @@ async function renderCases(params) {
         avatar(name, c.contact_id, { sm: true, online: c.contact.online }),
         h('span', { class: 'c-name' }, name)),
       h('span', { class: 'c-cat' }, c.category ? h('span', { class: 'pill cat' }, c.category) : h('span', { class: 'faint' }, '—')),
-      h('span', { class: 'c-status' }, h('span', { class: 'pill ' + c.status }, c.status)),
+      h('span', { class: 'c-status' }, statusPill(c)),
       h('span', { class: 'c-agent' }, c.assignee_id ? agentName(c.assignee_id) || 'Former agent' : h('span', { class: 'faint' }, 'Unassigned')),
       h('span', { class: 'c-opened' }, shortDate(c.created_at)),
       h('span', { class: 'c-age' }, age, h('span', { class: 'faint' }, ` · ${c.message_count} msg`)),
@@ -1270,7 +1489,8 @@ function teamCard(isAdmin) {
         h('option', { value: 'agent', selected: a.role === 'agent' }, 'Agent'),
         h('option', { value: 'admin', selected: a.role === 'admin' }, 'Admin'))
       : a.role),
-    h('td', { class: 'small' }, a.disabled ? 'Disabled' : a.online ? h('span', { style: 'color:var(--good)' }, 'Online') : h('span', { class: 'muted' }, 'Offline')),
+    h('td', { class: 'small' }, a.disabled ? 'Disabled' : a.away ? h('span', { style: 'color:var(--warn, #b7791f)' }, 'Away')
+      : a.online ? h('span', { style: 'color:var(--good)' }, 'Online') : h('span', { class: 'muted' }, 'Offline')),
     isAdmin ? h('td', { class: 'actions' },
       h('button', {
         class: 'btn ghost', onclick: () => {
@@ -1356,7 +1576,7 @@ function opsCard() {
   return h('section', { class: 'card' },
     h('h2', {}, 'Email and backups'),
     h('p', {}, state.emailEnabled
-      ? 'Email is on: customers who leave an address get replies by email when they\'re off the site, and assigned agents get new messages when they\'re out of the inbox.'
+      ? 'Email is on: customers who leave an address get replies by email when they\'re off the site.'
       : 'Email is off. Set SMTP_HOST, SMTP_FROM and (usually) SMTP_USERNAME / SMTP_PASSWORD on the server to email replies to customers who have left.'),
     h('a', { class: 'btn', href: '/api/admin/backup' }, 'Download database backup'));
 }
@@ -2034,6 +2254,8 @@ async function boot() {
     state.emailEnabled = me.email_enabled;
     state.ai = me.ai;
     state.baseUrl = me.base_url || location.origin;
+    state.ntfyEnabled = !!me.ntfy_enabled;
+    state.notifyEmail = me.notify_email || '';
   } catch {
     if (!state.me) renderLogin();
     return;

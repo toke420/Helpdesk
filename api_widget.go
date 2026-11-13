@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
 )
@@ -23,7 +22,7 @@ func (a *App) publicSettings(r *http.Request) (widgetSettings, error) {
 	return widgetSettings{
 		BrandName: s["brand_name"], AccentColor: s["accent_color"],
 		Greeting: s["greeting"], OfflineMessage: s["offline_message"],
-		Online: a.hub.Active("agents"),
+		Online: a.pres.anyAvailable(),
 	}, nil
 }
 
@@ -109,7 +108,7 @@ func (a *App) widgetConversation(w http.ResponseWriter, r *http.Request, c *Cont
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"conversation": map[string]any{"id": conv.ID, "status": conv.Status},
+		"conversation": widgetConv(conv),
 		"messages":     msgs,
 	})
 }
@@ -119,20 +118,24 @@ func (a *App) widgetConversation(w http.ResponseWriter, r *http.Request, c *Cont
 type widgetCase struct {
 	ID            int64  `json:"id"`
 	Status        string `json:"status"`
+	StatusLabel   string `json:"status_label"` // full case state, e.g. "Awaiting Approval"
 	Subject       string `json:"subject"`
 	Preview       string `json:"preview"`
 	CreatedAt     int64  `json:"created_at"`
 	LastMessageAt int64  `json:"last_message_at"`
 	ClosedAt      *int64 `json:"closed_at"`
+	Number        string `json:"number"`
+	RelatedNumber string `json:"related_number"`
 }
 
 func toWidgetCase(c *Conversation) widgetCase {
-	return widgetCase{ID: c.ID, Status: c.Status, Subject: c.Subject, Preview: c.Preview,
-		CreatedAt: c.CreatedAt, LastMessageAt: c.LastMessageAt, ClosedAt: c.ClosedAt}
+	return widgetCase{ID: c.ID, Status: c.Status, StatusLabel: caseStateLabel(c), Subject: c.Subject, Preview: c.Preview,
+		CreatedAt: c.CreatedAt, LastMessageAt: c.LastMessageAt, ClosedAt: c.ClosedAt,
+		Number: c.Number, RelatedNumber: c.RelatedNumber}
 }
 
 func (a *App) widgetCases(w http.ResponseWriter, r *http.Request, c *Contact) {
-	convs, err := a.store.ContactConversations(r.Context(), c.ID)
+	convs, err := a.store.ContactConversations(r.Context(), c.ID, "") // never by email: a visitor's email is unverified
 	if err != nil {
 		serverError(w, err)
 		return
@@ -174,6 +177,9 @@ func (a *App) widgetSend(w http.ResponseWriter, r *http.Request, c *Contact) {
 		Page   string `json:"page"`
 		CaseID int64  `json:"case_id"`
 		New    bool   `json:"new"`
+		// Only used when this message starts a new case.
+		Related string `json:"related"`
+		Via     string `json:"via"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -184,10 +190,19 @@ func (a *App) widgetSend(w http.ResponseWriter, r *http.Request, c *Contact) {
 		return
 	}
 	ctx := r.Context()
+	link, problem, err := a.resolveCaseLink(r, c, req.Related, req.Via)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if problem != "" {
+		writeErr(w, http.StatusBadRequest, problem)
+		return
+	}
 	if req.Page != "" {
 		a.store.TouchContact(ctx, c.ID, "", truncate(req.Page, 500))
 	}
-	conv, msg, created, err := a.store.AddContactMessage(ctx, c, body, req.CaseID, req.New)
+	conv, msg, created, err := a.store.AddContactMessage(ctx, c, body, req.CaseID, req.New, link)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -201,21 +216,12 @@ func (a *App) widgetSend(w http.ResponseWriter, r *http.Request, c *Contact) {
 		a.queueAIReply(conv)
 	}
 
-	// Email the assigned agent if they aren't in the inbox right now.
-	if conv.AssigneeID != nil && !a.hub.Active(topicAgent(*conv.AssigneeID)) {
-		if ag, err := a.store.GetAgent(ctx, *conv.AssigneeID); err == nil && !ag.Disabled {
-			who := c.Name
-			if who == "" {
-				who = "A customer"
-			}
-			a.mailer.Notify(fmt.Sprintf("agent:%d:conv:%d", ag.ID, conv.ID), ag.Email,
-				fmt.Sprintf("New message from %s (#%d)", who, conv.ID),
-				fmt.Sprintf("%s wrote:\n\n%s\n\nOpen the conversation: %s/#/c/%d\n", who, body, a.cfg.BaseURL, conv.ID))
-		}
-	}
+	// Sound in the open inbox, else phones, else email (notify.go).
+	contact := *c
+	go a.notifyNewMessage(conv, &contact, msg)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"message":      msg,
-		"conversation": map[string]any{"id": conv.ID, "status": conv.Status},
+		"conversation": widgetConv(conv),
 		"case":         toWidgetCase(conv),
 		"new":          created,
 	})
@@ -256,8 +262,87 @@ func (a *App) widgetProfile(w http.ResponseWriter, r *http.Request, c *Contact) 
 }
 
 func (a *App) widgetStream(w http.ResponseWriter, r *http.Request, c *Contact) {
-	first := []Event{{Type: "presence", Data: map[string]bool{"online": a.hub.Active("agents")}}}
+	first := []Event{{Type: "presence", Data: map[string]bool{"online": a.pres.anyAvailable()}}}
 	a.hub.Publish("agents", Event{Type: "visitor", Data: map[string]any{"contact_id": c.ID, "online": true}})
 	defer a.hub.Publish("agents", Event{Type: "visitor", Data: map[string]any{"contact_id": c.ID, "online": false}})
 	a.serveSSE(w, r, first, topicContact(c.ID), "visitors")
+}
+
+// widgetConv is what a visitor may know about their own conversation.
+func widgetConv(c *Conversation) map[string]any {
+	return map[string]any{"id": c.ID, "status": c.Status, "status_label": caseStateLabel(c), "number": c.Number, "related_number": c.RelatedNumber}
+}
+
+// resolveCaseLink checks the visitor's answer to "is this about a previous
+// case?". A typed case number only links the new chat for the team: the
+// visitor never sees that case's messages, so guessing numbers reveals nothing.
+func (a *App) resolveCaseLink(r *http.Request, c *Contact, related, via string) (*caseLink, string, error) {
+	switch via {
+	case "", "new":
+		return nil, "", nil
+	case "number":
+		id, ok := parseCaseNumber(related)
+		if !ok {
+			return nil, "That doesn't look like a case number. It looks like HD-1234.", nil
+		}
+		exists, err := a.store.ConversationExists(r.Context(), id)
+		if err != nil {
+			return nil, "", err
+		}
+		if !exists {
+			return nil, "We couldn't find that case number. Check it, or choose \u201cI'm not sure\u201d.", nil
+		}
+		return &caseLink{ID: id, Via: "number"}, "", nil
+	case "unsure":
+		// Only ever this visitor's own last case.
+		last, err := a.store.LatestConversation(r.Context(), c.ID)
+		if errors.Is(err, errNotFound) {
+			return nil, "", nil
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return &caseLink{ID: last.ID, Via: "unsure"}, "", nil
+	}
+	return nil, "unknown answer", nil
+}
+
+// widgetLastCase is the visitor's own most recent case, for "I'm not sure".
+func (a *App) widgetLastCase(w http.ResponseWriter, r *http.Request, c *Contact) {
+	last, err := a.store.LatestConversation(r.Context(), c.ID)
+	if errors.Is(err, errNotFound) {
+		writeJSON(w, http.StatusOK, map[string]any{"case": nil})
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"case": map[string]any{
+		"number": last.Number, "subject": last.Subject, "status": last.Status, "status_label": caseStateLabel(last), "created_at": last.CreatedAt,
+	}})
+}
+
+// widgetCaseCheck says whether a typed case number exists, and nothing else.
+func (a *App) widgetCaseCheck(w http.ResponseWriter, r *http.Request, c *Contact) {
+	if !a.limit.Allow("casecheck:"+a.clientIP(r), 20, 10*time.Minute) {
+		writeErr(w, http.StatusTooManyRequests, "Too many tries. Wait a few minutes, or choose \u201cI'm not sure\u201d.")
+		return
+	}
+	var req struct {
+		Number string `json:"number"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	link, problem, err := a.resolveCaseLink(r, c, req.Number, "number")
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if problem != "" {
+		writeErr(w, http.StatusNotFound, problem)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": caseNumber(link.ID)})
 }

@@ -21,10 +21,12 @@ A small, self-hosted live-chat help desk in the spirit of Intercom: a chat bubbl
 ## Run it
 
 ```sh
-cp .env.example .env      # set HELPDESK_BASE_URL, HELPDESK_ALLOWED_ORIGINS, admin email
+cp .env.example .env      # set HELPDESK_BASE_URL, HELPDESK_ALLOWED_ORIGINS, admin login
 docker compose up -d --build
 docker compose logs helpdesk   # shows the generated admin password if you left it blank
 ```
+
+**Default sign-in:** `admin@example.com` / `ChangeMe-123` (from `.env.example`). These defaults are public, so change them in `.env` before the first start, or sign in and change the password and email straight away. They're only used to create the first admin on an empty database; editing them later has no effect.
 
 Open your `HELPDESK_BASE_URL`, sign in, then go to **Settings → Chat widget** to copy the embed snippet. `/demo` on the same host is a test page with the widget already on it.
 
@@ -37,7 +39,10 @@ The first build needs internet access to fetch Go and the SQLite driver. For rep
 | `HELPDESK_BASE_URL` | `http://localhost:8080` | Public URL of the help desk. `https://` turns on secure cookies. |
 | `HELPDESK_ALLOWED_ORIGINS` | *(none)* | Sites that may embed the widget, comma-separated (e.g. `https://example.com`). `*` allows any. The help desk's own origin is always allowed. |
 | `HELPDESK_TRUST_PROXY` | `false` | Read client IPs from `X-Forwarded-For` (set `true` behind a proxy). |
-| `HELPDESK_ADMIN_EMAIL` / `HELPDESK_ADMIN_PASSWORD` | `admin@example.com` / generated | First admin, created only when there are no agents. |
+| `NTFY_URL` | *(none)* | ntfy topic URL (e.g. `https://ntfy.sh/long-random-name`) for new chat messages when everyone is Away or signed out. |
+| `NTFY_TOKEN` | *(none)* | Access token, for protected ntfy topics. |
+| `NOTIFY_EMAIL` | *(none)* | Fallback address for new chat messages when ntfy isn't set up or fails. Needs SMTP. |
+| `HELPDESK_ADMIN_EMAIL` / `HELPDESK_ADMIN_PASSWORD` | `admin@example.com` / generated if blank (`.env.example` sets `ChangeMe-123`) | First admin, created only when there are no agents. |
 | `HELPDESK_ADDR` | `:8080` | Listen address. |
 | `HELPDESK_DATA_DIR` | `/data` in the image | Where `helpdesk.db` lives. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | *(off)* | Outbound email. Port 587 = STARTTLS, 465 = implicit TLS. |
@@ -124,3 +129,32 @@ Database changes apply automatically on start (tracked with SQLite's `user_versi
 ## Roadmap
 
 v2 email-to-conversation (IMAP), canned replies, attachments, search · v3 knowledge base, CSAT, tags · v4 reports, round-robin assignment, office hours, Slack/Discord webhooks.
+
+## Notifications
+
+Each agent sets themselves **Available** or **Away** in the sidebar. When a customer writes:
+
+1. **Someone is Available** (the inbox is open and on screen, or open on a computer): the inbox plays a sound (🔔 in the sidebar mutes it on that device).
+2. **Everyone is Away, or nobody has the inbox open**: a notification is published to `NTFY_URL`. Tapping it opens the conversation.
+3. **ntfy isn't set up or fails**: the message is emailed to `NOTIFY_EMAIL`. Lines sent within a minute arrive as one email, and nothing is sent if someone replies first.
+
+A phone with the inbox in the background counts as Away, since it can't play the sound. The chat widget shows the team as online only when someone is Available. Admins can send a test from **Settings → Notifications**.
+
+## Case numbers
+
+Every conversation has a case number: `HD-` plus 1000 + its id (conversation 35 is HD-1035).
+Customers see it at the top of the chat and in reply emails. ntfy alerts and the orders@ emails include it too.
+
+Before a customer's message starts a new case, the widget asks whether it's about an earlier case:
+
+- **Yes:** they type the number. It's checked with `POST /api/widget/case-check`, and the new case is linked to that one.
+  The customer never sees the earlier case's messages, so guessing numbers reveals nothing.
+- **No:** a new case, with no link.
+- **I'm not sure:** `GET /api/widget/last-case` shows this browser's last case, and they confirm it or start a new one.
+
+The inbox search box takes case numbers (finding the case and any cases that follow it), names, emails and message text.
+A case's details panel lists the customer's cases, including those from other browsers where they gave the same email.
+
+## Theme
+
+The inbox and widget follow the device's light/dark setting. The moon/sun button (sidebar or widget header) overrides it, remembered per browser.
