@@ -1,0 +1,23 @@
+services:
+  helpdesk:
+    build: .
+    image: helpdesk:latest
+    container_name: helpdesk
+    restart: unless-stopped
+    env_file: .env
+    # Only reachable from the host; your reverse proxy forwards to it.
+    # Using a shared Docker network with the proxy instead? Remove `ports`
+    # and point the proxy at http://helpdesk:8080.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - helpdesk-data:/data
+    # Using a local Ollama on this host for AI? Uncomment so the container can reach it
+    # at http://host.docker.internal:11434/v1 (see .env.example).
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    mem_limit: 128m
+    cpus: 0.5
+
+volumes:
+  helpdesk-data:

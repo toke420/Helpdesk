@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Widget test page</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; color: #1b1f27; background: #fbfbfc; }
+  main { max-width: 680px; margin: 0 auto; padding: 64px 24px; }
+  h1 { font-size: 28px; margin: 0 0 8px; }
+  p { color: #5f6877; }
+  code { background: #eef0f3; padding: 2px 6px; border-radius: 4px; font-size: 14px; }
+  .box { border: 1px dashed #cfd4dc; border-radius: 12px; padding: 20px; margin-top: 32px; background: #fff; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Widget test page</h1>
+  <p>This page plays the part of your website. The chat bubble in the bottom-right corner is the widget your customers will see.</p>
+  <div class="box">
+    <p><strong>Try it:</strong> open the bubble, send a message, then answer it from the inbox in another tab. Close this tab and reply again to see the email fallback (when SMTP is configured).</p>
+    <p>On your own site, add this before <code>&lt;/body&gt;</code>:<br><code id="snippet"></code></p>
+  </div>
+</main>
+<script src="/widget.js" async></script>
+<script>document.getElementById('snippet').textContent = '<script src="' + location.origin + '/widget.js" async></' + 'script>';</script>
+</body>
+</html>
