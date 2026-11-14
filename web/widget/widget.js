@@ -326,7 +326,7 @@
   function whoCard(then) {
     var card = el('div', 'card');
     var name = el('input'); name.type = 'text'; name.autocomplete = 'name'; name.value = s.contact.name || ''; name.maxLength = 100;
-    var email = el('input'); email.type = 'email'; email.autocomplete = 'email'; email.value = s.contact.email || ''; email.maxLength = 254;
+    var email = el('input'); email.type = 'email'; email.autocomplete = 'email'; email.spellcheck = false; email.setAttribute('autocapitalize', 'off'); email.value = s.contact.email || ''; email.maxLength = 254;
     var ln = el('label', null, 'Your name'); ln.append(name);
     var le = el('label', null, 'Email'); le.append(email);
     var err = el('div', 'err', s.fb.err);
@@ -485,13 +485,14 @@
     '.wrap[data-theme=dark]{--bg:#16191f;--sunken:#1f232b;--line:#2b3039;--line2:#3a404b;--text:#e9ecf1;--muted:#a1a9b6;--field:#1d2128;--ok:#5fd394;--ok-bg:#16301f;--bad:#ff8a8a;--warn:#f0b65a;--warn-bg:#33270f;--ai:#b9a2f5;--ai-bg:#2c2147;--shadow:0 24px 60px rgba(0,0,0,.55),0 2px 6px rgba(0,0,0,.4);color-scheme:dark}',
     '.wrap{position:fixed;right:20px;bottom:20px;z-index:2147483000;font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased}',
     'button{font:inherit;color:inherit}',
+    'a,button,input,select,textarea,label{touch-action:manipulation;-webkit-tap-highlight-color:transparent}',
     '.bubble{width:60px;height:60px;border-radius:50%;border:0;background:var(--a);color:#fff;cursor:pointer;display:grid;place-items:center;box-shadow:var(--shadow);transition:transform .15s ease;position:relative;margin-left:auto}',
     '.bubble:hover{transform:scale(1.05)}',
     'button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--a);outline-offset:2px}',
     '.bubble svg{width:28px;height:28px}',
     '.badge{position:absolute;top:-2px;right:-2px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:#c42b2b;color:#fff;font-size:12px;font-weight:700;display:grid;place-items:center;border:2px solid var(--bg)}',
     '.badge[hidden]{display:none}',
-    '.panel{position:absolute;right:0;bottom:76px;width:370px;height:min(600px,calc(100vh - 120px));background:var(--bg);border-radius:20px;box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98);transform-origin:bottom right;pointer-events:none;transition:opacity .16s ease,transform .16s ease}',
+    '.panel{position:absolute;right:0;bottom:76px;width:370px;height:min(600px,calc(100vh - 120px));height:min(600px,calc(100dvh - 120px));background:var(--bg);border-radius:20px;box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98);transform-origin:bottom right;pointer-events:none;transition:opacity .16s ease,transform .16s ease}',
     '.panel.on{opacity:1;transform:none;pointer-events:auto}',
     '.head{background:var(--a);color:#fff;padding:14px 12px 14px 16px;display:flex;align-items:center;gap:8px}',
     '.logo{width:40px;height:40px;border-radius:12px;background:rgba(255,255,255,.18);display:grid;place-items:center;flex:none}',
@@ -614,8 +615,11 @@
     '.card textarea{border:1px solid var(--line2);border-radius:10px;padding:10px 12px;font:inherit;color:var(--text);background:var(--field);width:100%;resize:vertical}',
     '.cbox{display:flex;gap:8px;align-items:flex-end;margin-top:4px}',
     '.cbox textarea{flex:1;border:1px solid var(--line2);border-radius:12px;padding:10px 12px;font:inherit;color:var(--text);background:var(--field);resize:vertical;min-height:44px}',
-    '@media (max-width:480px){.wrap{right:12px;bottom:12px}.panel{position:fixed;inset:0;width:auto;height:auto;border-radius:0;bottom:0}.wrap.open .bubble{display:none}}',
-    '@media (prefers-reduced-motion:reduce){.panel,.bubble{transition:none}}',
+    // Full screen on phones: keep the header and the message box clear of the notch and home bar.
+    '@media (max-width:480px){.wrap{right:12px;bottom:12px}.panel{position:fixed;inset:0;width:auto;height:auto;border-radius:0;bottom:0;padding:0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);overscroll-behavior:contain}.head{padding-top:calc(14px + env(safe-area-inset-top))}.wrap.open .bubble{display:none}}',
+    '@media (prefers-reduced-motion:reduce){.panel,.bubble{transition:none}.bubble:hover{transform:none}.typing i{animation:none;opacity:.6}}',
+    // Last so it beats the font:inherit on each field: iOS zooms into any field under 16px.
+    '@media (pointer:coarse){input,textarea,select{font-size:16px!important}}',
   ].join('\n');
 
   var ICON_CHAT = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 10h16v11h-9l-5 4v-4H8z" fill="currentColor"/></svg>';
@@ -1044,6 +1048,8 @@
     email.type = 'email';
     email.placeholder = 'you@example.com';
     email.autocomplete = 'email';
+    email.spellcheck = false;
+    email.setAttribute('autocapitalize', 'off');
     email.setAttribute('aria-label', 'Your email');
     var err = el('div', 'err');
     var save = btn('pri', 'Save');
@@ -1066,6 +1072,7 @@
     var f = root.querySelector('.flash');
     if (f) f.remove();
     f = el('div', 'flash', text);
+    f.setAttribute('role', 'status'); // read out by screen readers
     ui.panel.append(f);
     clearTimeout(flashTimer);
     flashTimer = setTimeout(function () { f.remove(); }, 3500);
