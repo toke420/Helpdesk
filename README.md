@@ -24,7 +24,11 @@ A small, self-hosted live-chat help desk in the spirit of Intercom: a chat bubbl
 
 ## Run it
 
+**Current version: v1.0.5**, on the `main` branch. You need Docker with the Compose plugin.
+
 ```sh
+git clone -b main https://github.com/toke420/Helpdesk.git helpdesk
+cd helpdesk
 cp .env.example .env      # set HELPDESK_BASE_URL, HELPDESK_ALLOWED_ORIGINS, admin login
 docker compose up -d --build
 docker compose logs helpdesk   # shows the generated admin password if you left it blank
