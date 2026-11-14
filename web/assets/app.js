@@ -135,6 +135,8 @@ const ICON = {
 };
 
 // ---------- light / dark ----------
+// A mouse or trackpad (not a phone): the only place it's polite to move focus on load.
+const finePointer = () => window.matchMedia('(pointer: fine)').matches;
 const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
 function isDark() {
   const t = document.documentElement.getAttribute('data-theme');
@@ -325,7 +327,7 @@ async function route() {
 // ---------- login ----------
 function renderLogin() {
   const err = h('div', { class: 'error', role: 'alert' });
-  const email = h('input', { class: 'input', type: 'email', name: 'email', autocomplete: 'username', required: true, autofocus: true });
+  const email = h('input', { class: 'input', type: 'email', name: 'email', autocomplete: 'username', spellcheck: 'false', autocapitalize: 'off', required: true });
   const pw = h('input', { class: 'input', type: 'password', name: 'password', autocomplete: 'current-password', required: true });
   const btn = h('button', { class: 'btn primary', type: 'submit' }, 'Sign in');
   const form = h('form', {
@@ -350,7 +352,8 @@ function renderLogin() {
     err, btn,
   );
   fill($app, h('div', { class: 'login' }, form));
-  email.focus();
+  // On phones, focusing opens the keyboard over the form before anyone asked for it.
+  if (finePointer()) email.focus();
 }
 
 // First sign-in with a password from setup (or the logs): pick your own
@@ -359,7 +362,7 @@ function renderFirstPassword() {
   const me = state.me;
   const err = h('div', { class: 'error', role: 'alert' });
   const name = h('input', { class: 'input', type: 'text', autocomplete: 'name', required: true, maxlength: 100, value: me.name });
-  const email = h('input', { class: 'input', type: 'email', autocomplete: 'username', required: true, value: me.email });
+  const email = h('input', { class: 'input', type: 'email', name: 'email', autocomplete: 'username', spellcheck: 'false', autocapitalize: 'off', required: true, value: me.email });
   const cur = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', required: true });
   const nw = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', required: true, minlength: 10 });
   const again = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', required: true, minlength: 10 });
@@ -381,7 +384,7 @@ function renderFirstPassword() {
   },
     h('div', { class: 'logo', html: ICON_LOGO }),
     h('h1', {}, 'Set up your account'),
-    h('p', {}, 'Before you start, replace the setup password with your own. You can also set your real name and email here.'),
+    h('p', {}, 'Before you start, replace the temporary password you were given with your own. You can also check your name and email here.'),
     h('label', { class: 'field' }, 'Your name', name),
     h('label', { class: 'field' }, 'Email (you sign in with this)', email),
     h('label', { class: 'field' }, 'Current password', cur),
@@ -413,7 +416,16 @@ function renderShell() {
   els.list = h('section', { class: 'list', 'aria-label': 'Conversations' });
   els.thread = h('section', { class: 'thread', 'aria-label': 'Conversation' });
   els.details = h('aside', { class: 'details', 'aria-label': 'Customer details' });
-  els.shell = h('div', { class: 'shell' }, els.sidebar, els.list, els.thread, els.details, els.scrim);
+  // First Tab stop: jump past the menu to the page (the conversation list, or a full-width page's <main>).
+  const skip = h('button', {
+    type: 'button', class: 'skip-link', onclick: () => {
+      const target = els.list;
+      if (!target) return;
+      if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+      target.focus();
+    },
+  }, 'Skip to main content');
+  els.shell = h('div', { class: 'shell' }, skip, els.sidebar, els.list, els.thread, els.details, els.scrim);
   fill($app, els.shell);
   renderSidebar();
   renderList();
@@ -474,8 +486,10 @@ function renderSidebar() {
     activitiesNav(route.kind === 'activities'),
     h('a', { class: 'nav-item' + (route.kind === 'cases' ? ' active' : ''), href: '#/cases' }, 'All cases'),
     h('a', { class: 'nav-item' + (route.kind === 'knowledge' ? ' active' : ''), href: '#/knowledge' }, 'Knowledge'),
-    state.settings.feedback_enabled === '1' || state.ideaPending ? h('a', { class: 'nav-item' + (route.kind === 'feedback' || route.kind === 'changelog' ? ' active' : ''), href: '#/feedback' }, 'Feedback',
+    state.settings.feedback_enabled === '1' || state.ideaPending ? h('a', { class: 'nav-item' + (route.kind === 'feedback' || route.kind === 'changelog' ? ' active' : ''), href: '#/feedback' }, 'Ideas',
       state.ideaPending ? h('span', { class: 'count hot', title: `${state.ideaPending} waiting for approval` }, state.ideaPending) : null) : null,
+    // The public board customers see; opens in a new tab so live chats keep running here.
+    h('a', { class: 'nav-item', href: '/feedback', target: '_blank', rel: 'noopener', title: 'Public feedback page (opens in a new tab)' }, 'Feedback'),
     h('a', { class: 'nav-item' + (route.kind === 'settings' ? ' active' : ''), href: '#/settings' }, 'Settings'),
     h('div', { class: 'spacer' }),
     h('div', { class: 'away-toggle', role: 'group', 'aria-label': 'Your status' },
@@ -1089,10 +1103,10 @@ function widgetCard() {
   const s = state.settings;
   const err = h('div', { class: 'error' });
   const f = {
-    brand_name: h('input', { class: 'input', value: s.brand_name, maxlength: 60 }),
-    accent_color: h('input', { class: 'input', value: s.accent_color, maxlength: 7, style: 'max-width:120px' }),
-    greeting: h('textarea', { class: 'input', rows: 2, maxlength: 500 }),
-    offline_message: h('textarea', { class: 'input', rows: 2, maxlength: 500 }),
+    brand_name: h('input', { class: 'input', name: 'brand_name', autocomplete: 'off', value: s.brand_name, maxlength: 60 }),
+    accent_color: h('input', { class: 'input', name: 'accent_color', autocomplete: 'off', spellcheck: 'false', value: s.accent_color, maxlength: 7, placeholder: '#2f6fed', style: 'max-width:120px' }),
+    greeting: h('textarea', { class: 'input', name: 'greeting', rows: 2, maxlength: 500 }),
+    offline_message: h('textarea', { class: 'input', name: 'offline_message', rows: 2, maxlength: 500 }),
   };
   f.greeting.value = s.greeting;
   f.offline_message.value = s.offline_message;
@@ -1326,8 +1340,8 @@ function ideaRow(it) {
 function newIdeaDialog(prefill = {}) {
   const err = h('div', { class: 'error' });
   const addVote = h('input', { type: 'checkbox', checked: true });
-  const title = h('input', { class: 'input', maxlength: 120, value: prefill.title || '', required: true, placeholder: 'Short and specific, e.g. "Order tracking by SMS"' });
-  const body = h('textarea', { class: 'input', rows: 5, maxlength: 5000, placeholder: 'What should it do, and why does it matter?' });
+  const title = h('input', { class: 'input', maxlength: 120, value: prefill.title || '', required: true, placeholder: 'Short and specific, e.g. “Order tracking by SMS”' });
+  const body = h('textarea', { class: 'input', rows: 5, maxlength: 5000, placeholder: 'What should it do, and why does it matter…' });
   body.value = prefill.body || '';
   const status = h('select', { class: 'input' }, IDEA_STATUSES.map(([k, t]) => h('option', { value: k }, t)));
   const dlg = h('dialog', { class: 't-dialog' });
@@ -1614,10 +1628,14 @@ async function renderChangelogEditor(id) {
       : h('p', { class: 'small muted', style: 'margin:0' }, 'No ideas linked.'));
   }
   drawChips();
+  const snap = () => JSON.stringify([title.value, body.value, linked.map(x => x.id)]);
+  let saved = snap();
+  guardUnsaved(() => title.isConnected && snap() !== saved);
   const save = async () => {
     err.textContent = '';
     const payload = { title: title.value, body: body.value, idea_ids: linked.map(x => x.id) };
     const r = id === 'new' ? await api('POST', '/api/changelog', payload) : await api('PUT', `/api/changelog/${id}`, payload);
+    saved = snap();
     return r.entry;
   };
   const notify = h('input', { type: 'checkbox', checked: true });
@@ -1666,7 +1684,7 @@ async function renderChangelogEditor(id) {
         id !== 'new' ? h('button', {
           class: 'btn danger', onclick: async () => {
             if (!confirm('Delete this post?')) return;
-            try { await api('DELETE', `/api/changelog/${id}`); toast('Deleted'); location.hash = '#/feedback/changelog'; } catch (ex) { toast(ex.message); }
+            try { await api('DELETE', `/api/changelog/${id}`); guardUnsaved(null); toast('Deleted'); location.hash = '#/feedback/changelog'; } catch (ex) { toast(ex.message); }
           },
         }, 'Delete') : null)));
   if (id === 'new') title.focus();
@@ -1712,7 +1730,7 @@ async function renderKnowledge() {
       if (!r.articles.length) {
         fill(list, h('div', { class: 'empty' },
           h('strong', {}, q ? 'No articles match' : 'No articles yet'),
-          q ? 'Try other words.' : 'Write how-tos and fixes here. Copilot uses all of them; the AI agent answers customers from published ones. Closing a case gives you a one-click "Turn into article".'));
+          q ? 'Try other words.' : 'Write how-tos and fixes here. Copilot uses all of them; the AI agent answers customers from published ones. Closing a case gives you a one-click “Turn into article”.'));
         return;
       }
       fill(list, h('div', { class: 'case-table' }, r.articles.map(a => h('a', { class: 'kb-row', href: `#/knowledge/${a.id}` },
@@ -1729,7 +1747,7 @@ async function renderKnowledge() {
     h('div', { class: 'cases-top' },
       h('div', { style: 'display:flex;align-items:center;gap:8px' }, menuButton(), h('h1', { style: 'flex:1' }, 'Knowledge'),
         h('a', { class: 'btn primary', href: '#/knowledge/new' }, '+ New article')),
-      h('p', {}, 'What your AI learns from. Copilot reads every article plus your resolved cases; the AI agent only answers customers from articles marked "AI agent can use".')),
+      h('p', {}, 'What your AI learns from. Copilot reads every article plus your resolved cases; the AI agent only answers customers from articles marked “AI agent can use”.')),
     state.ai?.enabled ? null : h('div', { class: 'callout', style: 'margin-bottom:16px' }, 'AI isn\'t connected yet — articles are saved, and will be used once an admin connects a model (Settings → AI).'),
     h('div', { class: 'cases-toolbar' }, h('div', { class: 'cases-search' },
       h('input', {
@@ -1755,6 +1773,9 @@ async function renderArticleEditor(id) {
   const body = h('textarea', { class: 'input kb-body', rows: 16, 'aria-label': 'Article' });
   body.value = art.body;
   const pub = h('input', { type: 'checkbox', checked: art.published });
+  const snap = () => JSON.stringify([title.value, body.value, pub.checked]);
+  let saved = snap();
+  guardUnsaved(() => title.isConnected && snap() !== saved);
   const save = h('button', {
     class: 'btn primary', onclick: async () => {
       err.textContent = '';
@@ -1763,10 +1784,12 @@ async function renderArticleEditor(id) {
       try {
         if (id === 'new') {
           const r = await api('POST', '/api/knowledge', payload);
+          saved = snap();
           toast('Article saved');
           location.hash = `#/knowledge/${r.article.id}`;
         } else {
           await api('PUT', `/api/knowledge/${id}`, payload);
+          saved = snap();
           toast('Saved');
         }
       } catch (ex) { err.textContent = ex.message; }
@@ -1787,7 +1810,7 @@ async function renderArticleEditor(id) {
         id !== 'new' && state.me.role === 'admin' ? h('button', {
           class: 'btn danger', onclick: async () => {
             if (!confirm('Delete this article? The AI will stop using it.')) return;
-            try { await api('DELETE', `/api/knowledge/${id}`); toast('Deleted'); location.hash = '#/knowledge'; }
+            try { await api('DELETE', `/api/knowledge/${id}`); guardUnsaved(null); toast('Deleted'); location.hash = '#/knowledge'; }
             catch (ex) { toast(ex.message); }
           },
         }, 'Delete') : null)));
@@ -2018,6 +2041,41 @@ async function renderCases(params) {
   await load(false);
 }
 
+// Shows a new temporary password once, with buttons to copy it. Replaces the
+// browser's prompt(), which was hard to copy from on phones and read poorly
+// with screen readers.
+function passwordDialog({ title, intro, email, password }) {
+  const status = h('p', { class: 'pw-status small', role: 'status' });
+  const field = h('input', {
+    class: 'input pw-value', type: 'text', readonly: true, value: password, spellcheck: 'false',
+    autocomplete: 'off', 'aria-label': 'Temporary password', onfocus: (e) => e.target.select(),
+  });
+  const signIn = `Sign in to ${state.settings.brand_name || 'the help desk'}\n${state.baseUrl}\nEmail: ${email}\nTemporary password: ${password}\n\nYou’ll be asked to choose your own password when you sign in.`;
+  async function copy(text, btn, label) {
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch { }
+    if (!ok) { // no clipboard API (plain http, older browsers): copy from the field instead
+      field.focus(); field.select();
+      try { ok = document.execCommand('copy'); } catch { }
+    }
+    status.textContent = ok ? `${label} copied.` : 'Couldn’t copy — select the password and copy it yourself.';
+    status.style.color = ok ? '' : 'var(--bad)';
+    if (ok) { btn.textContent = 'Copied ✓'; setTimeout(() => { btn.textContent = label === 'Password' ? 'Copy password' : 'Copy sign-in details'; }, 2000); }
+  }
+  const copyPw = h('button', { type: 'button', class: 'btn primary', onclick: (e) => copy(password, e.currentTarget, 'Password') }, 'Copy password');
+  const copyAll = h('button', { type: 'button', class: 'btn', onclick: (e) => copy(signIn, e.currentTarget, 'Sign-in details') }, 'Copy sign-in details');
+  const dlg = simpleDialog(title,
+    h('p', { style: 'margin:0 0 12px' }, intro),
+    h('div', { class: 'field' }, h('span', {}, 'Temporary password'), field),
+    h('p', { class: 'small muted', style: 'margin:0 0 4px' }, 'This is the only time it’s shown. When they sign in with it, they’ll be asked to choose their own password.'),
+    status,
+    h('div', { class: 't-dialog-f' }, copyPw, copyAll, h('span', { style: 'flex:1' }),
+      h('button', { type: 'button', class: 'btn ghost', onclick: () => dlg.close() }, 'Done')));
+  dlg.setAttribute('aria-label', title);
+  copyPw.focus();
+  return dlg;
+}
+
 function randomPassword() {
   const abc = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
   const b = crypto.getRandomValues(new Uint8Array(14));
@@ -2048,12 +2106,18 @@ function teamCard(isAdmin) {
         class: 'btn ghost', onclick: () => {
           const pw = randomPassword();
           if (!confirm(`Reset ${a.name}'s password? They'll be signed out everywhere.`)) return;
-          patch(a, { password: pw }, () => prompt(`New password for ${a.email} — copy it now:`, pw));
+          patch(a, { password: pw }, () => passwordDialog({
+            title: 'Password reset', email: a.email, password: pw,
+            intro: `Send ${a.name} this temporary password. They've been signed out everywhere.`,
+          }));
         },
       }, 'Reset password'),
       a.id !== state.me.id ? h('button', {
         class: 'btn ghost' + (a.disabled ? '' : ' danger'),
-        onclick: () => patch(a, { disabled: !a.disabled }),
+        onclick: () => {
+          if (!a.disabled && !confirm(`Disable ${a.name}? They'll be signed out and can't sign in until you enable them again.`)) return;
+          patch(a, { disabled: !a.disabled });
+        },
       }, a.disabled ? 'Enable' : 'Disable') : null,
     ) : null,
   ));
@@ -2061,8 +2125,8 @@ function teamCard(isAdmin) {
   let addForm = null;
   if (isAdmin) {
     const err = h('div', { class: 'error' });
-    const name = h('input', { class: 'input', placeholder: 'Sam Lee' });
-    const email = h('input', { class: 'input', type: 'email', placeholder: 'sam@company.com' });
+    const name = h('input', { class: 'input', name: 'name', autocomplete: 'off', placeholder: 'Sam Lee…' });
+    const email = h('input', { class: 'input', type: 'email', name: 'email', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', placeholder: 'sam@company.com' });
     const role = h('select', { class: 'input' }, h('option', { value: 'agent' }, 'Agent'), h('option', { value: 'admin' }, 'Admin'));
     addForm = h('form', {
       style: 'margin-top:20px', onsubmit: async (e) => {
@@ -2071,8 +2135,12 @@ function teamCard(isAdmin) {
         const pw = randomPassword();
         try {
           await api('POST', '/api/agents', { name: name.value, email: email.value, role: role.value, password: pw });
-          prompt(`Agent added. Send ${email.value} this temporary password (they can change it in Settings):`, pw);
+          const who = { name: name.value.trim() || email.value, email: email.value };
           renderSettings();
+          passwordDialog({
+            title: 'Teammate added', email: who.email, password: pw,
+            intro: `Send ${who.name} these sign-in details.`,
+          });
         } catch (ex) { err.textContent = ex.message; }
       },
     },
@@ -2490,7 +2558,7 @@ function renderActsBody() {
         ? 'Nothing planned for today yet. Add what you\'re going to tackle below — or pull tasks in from Upcoming.'
         : 'Nothing planned for today.');
     } else if (!n && card.add) {
-      empty = h('div', { class: 't-empty' }, card.key === 'someday' ? 'Ideas and "when I get a minute" jobs go here.' : 'Nothing planned.');
+      empty = h('div', { class: 't-empty' }, card.key === 'someday' ? 'Ideas and “when I get a minute” jobs go here.' : 'Nothing planned.');
     }
     return h('section', { class: 't-card' + (card.tone ? ' ' + card.tone : '') },
       h('header', { class: 't-card-h' },
@@ -2498,7 +2566,7 @@ function renderActsBody() {
         h('h2', {}, card.title),
         h('span', { class: 't-card-n' }, card.progress && done ? `${n} ${n === 1 ? 'task' : 'tasks'} · ${done} done` : `${n} ${n === 1 ? 'task' : 'tasks'}`)),
       card.progress && n ? h('div', { class: 't-progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': String(n), 'aria-valuenow': String(done), 'aria-label': 'Done today' },
-        h('span', { style: `width:${Math.round(done / n * 100)}%` })) : null,
+        h('span', { style: `transform:scaleX(${(done / n).toFixed(3)})` })) : null,
       rows, empty,
       card.add ? addRow(card) : null);
   }));
@@ -2624,33 +2692,45 @@ function keyMove(e, t) {
   renderActsBody();
   acts.bodyEl.querySelector(`.t-row[data-id="${t.id}"] .t-handle`)?.focus();
 }
+// Row positions are measured once per drag (and again after any scroll), not
+// on every dragover event, which fires many times a second.
+let dragGeometry = 0;
+window.addEventListener('scroll', () => { dragGeometry++; }, { capture: true, passive: true });
 function wireDrop(listEl, card) {
+  let mids = null, midsAt = -1;
   listEl.addEventListener('dragstart', (e) => {
     const row = e.target.closest?.('.t-row');
     if (!row) return;
     acts.drag = { id: Number(row.dataset.id), from: card.key };
+    dragGeometry++;
     row.classList.add('dragging');
+    listEl.classList.add('is-dragging');
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', row.dataset.id);
   });
   listEl.addEventListener('dragend', () => {
     document.querySelectorAll('.t-row.dragging, .drop-before, .drop-after').forEach(el => el.classList.remove('dragging', 'drop-before', 'drop-after'));
+    listEl.classList.remove('is-dragging');
+    mids = null;
     acts.drag = null;
     if (acts.dirty) { acts.dirty = false; renderActsBody(); }
   });
   const target = (e) => {
-    const rows = [...listEl.querySelectorAll('.t-row:not(.dragging)')];
-    for (const r of rows) {
-      const box = r.getBoundingClientRect();
-      if (e.clientY < box.top + box.height / 2) return { row: r, before: true };
+    if (!mids || midsAt !== dragGeometry) {
+      mids = [...listEl.querySelectorAll('.t-row:not(.dragging)')].map(r => {
+        const box = r.getBoundingClientRect();
+        return { row: r, mid: box.top + box.height / 2 };
+      });
+      midsAt = dragGeometry;
     }
-    return { row: rows[rows.length - 1] || null, before: false };
+    for (const m of mids) if (e.clientY < m.mid) return { row: m.row, before: true };
+    return { row: mids.length ? mids[mids.length - 1].row : null, before: false };
   };
   listEl.addEventListener('dragover', (e) => {
     if (!acts.drag || card.date === undefined && acts.drag.from !== card.key) return;
     e.preventDefault();
+    const { row, before } = target(e); // read layout before changing any classes
     listEl.querySelectorAll('.drop-before, .drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after'));
-    const { row, before } = target(e);
     if (row) row.classList.add(before ? 'drop-before' : 'drop-after');
     else listEl.classList.add('drop-after');
   });
@@ -2826,5 +2906,24 @@ async function boot() {
   await route();
 }
 
-window.addEventListener('hashchange', route);
+// ---------- unsaved changes ----------
+// An open editor registers a check; closing the tab or following a link
+// away from it asks first. Saving updates the editor's snapshot, so the
+// redirect after a save goes through without a question.
+let dirtyCheck = null;
+let lastHash = location.hash;
+function guardUnsaved(check) { dirtyCheck = check; }
+const hasUnsaved = () => { try { return !!(dirtyCheck && dirtyCheck()); } catch { return false; } };
+window.addEventListener('beforeunload', (e) => {
+  if (hasUnsaved()) { e.preventDefault(); e.returnValue = ''; }
+});
+window.addEventListener('hashchange', () => {
+  if (hasUnsaved() && !confirm('Leave this page? Your unsaved changes will be lost.')) {
+    history.replaceState(null, '', lastHash); // back to the editor, nothing reloads
+    return;
+  }
+  dirtyCheck = null;
+  lastHash = location.hash;
+  route();
+});
 boot();

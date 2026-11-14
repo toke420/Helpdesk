@@ -58,6 +58,13 @@ html, body { height: 100%; margin: 0; }
 body { font: 14px/1.45 var(--font); color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased; }
 button, input, textarea, select { font: inherit; color: inherit; }
 a { color: var(--accent-text); }
+/* No double-tap zoom delay on controls; focus rings and :hover give the feedback instead of the grey tap flash. */
+a, button, input, select, textarea, label, summary, [role="button"] { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+h1, h2, h3 { text-wrap: balance; }
+/* iOS zooms into any field under 16px when it gets focus. */
+@media (pointer: coarse) { input, select, textarea { font-size: 16px; } }
+.skip-link { position: fixed; top: 8px; left: 8px; z-index: 100; padding: 8px 14px; border: 0; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font-weight: 600; cursor: pointer; transform: translateY(-200%); }
+.skip-link:focus-visible { transform: none; outline: 2px solid var(--text); outline-offset: 2px; }
 .boot { display: grid; place-items: center; height: 100vh; color: var(--muted); }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
@@ -146,7 +153,7 @@ label.field .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
 .list-head h2 { font-size: 20px; margin: 0; flex: 1; letter-spacing: -.02em; }
 .list-head .n { font-size: 12px; color: var(--muted); }
 .search { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-radius: 10px; background: var(--sunken); color: var(--muted); border: 1px solid transparent; }
-.search:focus-within { border-color: var(--accent); background: var(--panel); }
+.search:focus-within { border-color: var(--accent); background: var(--panel); outline: 2px solid var(--accent); outline-offset: 2px; }
 .search input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); outline: none; }
 .list-body { overflow-y: auto; flex: 1; padding: 0 10px 16px; display: flex; flex-direction: column; gap: 2px; }
 .conv { display: grid; grid-template-columns: 36px 1fr; gap: 12px; padding: 12px; border-radius: 12px; cursor: pointer; text-decoration: none; color: inherit; }
@@ -203,6 +210,9 @@ label.field .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
 .composer-wrap { padding: 0 24px 24px; }
 .composer { max-width: 760px; margin: 0 auto; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--panel); box-shadow: var(--shadow); }
 .composer.note-mode { background: var(--note); border-style: dashed; border-color: var(--note-line); }
+/* The textarea has no outline of its own, so the whole composer shows the focus ring. */
+.composer:has(textarea:focus) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer.note-mode:has(textarea:focus) { outline-color: var(--note-ink); }
 .composer .tabs { display: flex; gap: 4px; padding: 8px 8px 0; }
 .composer .tab { height: 32px; border: 0; background: none; padding: 0 12px; border-radius: 8px; cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; }
 .composer .tab.on { background: var(--panel); color: var(--text); box-shadow: 0 0 0 1px var(--line); }
@@ -376,7 +386,7 @@ label.check input { width: 16px; height: 16px; }
 .t-card.late .t-card-ico { background: var(--bad-soft); color: var(--bad); }
 .t-card-n { font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
 .t-progress { height: 3px; border-radius: 3px; background: var(--sunken); margin: 10px 0 2px; overflow: hidden; }
-.t-progress span { display: block; height: 100%; background: var(--good); border-radius: 3px; transition: width .3s ease; }
+.t-progress span { display: block; height: 100%; background: var(--good); border-radius: 3px; transform-origin: left center; transition: transform .3s ease; }
 .t-list { display: flex; flex-direction: column; min-height: 4px; }
 .t-list.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .t-empty { color: var(--muted); font-size: 13px; padding: 14px 4px 4px; }
@@ -385,6 +395,7 @@ label.check input { width: 16px; height: 16px; }
 .t-row + .t-row { border-top: 1px solid transparent; }
 .t-row:hover { background: var(--sunken); }
 .t-row.dragging { opacity: .4; }
+.t-list.is-dragging { user-select: none; -webkit-user-select: none; }
 .t-row.drop-before::before, .t-row.drop-after::after { content: ""; position: absolute; left: 4px; right: 4px; height: 2px; background: var(--accent); border-radius: 2px; }
 .t-row.drop-before::before { top: -1px; }
 .t-row.drop-after::after { bottom: -1px; }
@@ -436,7 +447,7 @@ label.check input { width: 16px; height: 16px; }
 .kind-btn.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(16, 24, 40, .12); }
 .kind-btn:focus-visible { outline: 2px solid var(--accent); }
 
-.t-dialog { border: 1px solid var(--line); border-radius: 16px; padding: 0; width: min(520px, calc(100vw - 32px)); background: var(--panel); color: var(--text); box-shadow: 0 20px 60px rgba(16, 24, 40, .25); }
+.t-dialog { border: 1px solid var(--line); border-radius: 16px; padding: 0; width: min(520px, calc(100vw - 32px)); background: var(--panel); color: var(--text); box-shadow: 0 20px 60px rgba(16, 24, 40, .25); overscroll-behavior: contain; }
 .t-dialog::backdrop { background: rgba(16, 24, 40, .35); }
 .t-dialog form { padding: 18px 20px 16px; }
 .t-dialog-h { display: flex; align-items: center; margin-bottom: 12px; }
@@ -470,7 +481,7 @@ label.check input { width: 16px; height: 16px; }
   .t-dialog-f { flex-wrap: wrap; }
 }
 
-.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--panel); padding: 10px 16px; border-radius: 10px; box-shadow: var(--shadow); z-index: 10; font-weight: 550; }
+.toast { position: fixed; bottom: calc(20px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--panel); padding: 10px 16px; border-radius: 10px; box-shadow: var(--shadow); z-index: 10; font-weight: 550; }
 
 /* ---------- feedback board ---------- */
 .idea-tabs { overflow-x: auto; margin-bottom: 14px; scrollbar-width: thin; }
@@ -567,5 +578,9 @@ a.seg-btn { display: inline-flex; align-items: center; text-decoration: none; }
   .grid2 { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sidebar, .scrim { transition: none !important; }
+  *, *::before, *::after { transition-duration: .01ms !important; transition-delay: 0s !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
 }
+
+/* ---------- temporary password dialog ---------- */
+.pw-value { font: 600 16px/1 var(--mono); letter-spacing: .04em; }
+.pw-status { min-height: 18px; margin: 0; color: var(--good); }

@@ -36,6 +36,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .logo { width: 30px; height: 30px; border-radius: 9px; background: var(--a); flex: none; display: grid; place-items: center; }
 .logo::after { content: ""; width: 14px; height: 11px; background: #fff; clip-path: polygon(0 0, 100% 0, 100% 70%, 45% 70%, 20% 100%, 20% 70%, 0 70%); }
 .brand { font-weight: 700; text-decoration: none; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.home { color: var(--muted); text-decoration: none; font-size: 14px; white-space: nowrap; padding: 8px 4px; }
+.home:hover { color: inherit; text-decoration: underline; }
 .theme { width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; display: grid; place-items: center; }
 .theme svg { width: 18px; height: 18px; }
 main.wrap { padding-top: 28px; padding-bottom: 64px; }
