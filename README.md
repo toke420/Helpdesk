@@ -134,9 +134,10 @@ Database changes apply automatically on start (tracked with SQLite's `user_versi
 
 ### What's new in v1.0.5
 
-No database changes; upgrading only replaces the web app.
+No database changes. Agents added before this version aren't affected; the rule applies to passwords set from now on.
 
 - **Temporary password dialog.** Adding a teammate or resetting a password shows the new password in a dialog with *Copy password* and *Copy sign-in details* (address, email and password, ready to paste into a message), instead of the browser's prompt box.
+- **Temporary passwords are temporary.** A new teammate, or anyone whose password an admin resets, must choose their own password at next sign-in before the inbox opens.
 - **Accessibility.** Visible focus rings on the reply box and search, a *Skip to main content* link, and screen-reader announcements for widget notices.
 - **Fewer accidents.** Disabling an agent asks first, and leaving the article or changelog editor with unsaved changes asks before throwing them away.
 - **Phones.** The full-screen chat widget keeps clear of the notch and home bar, fields are 16px so iOS doesn't zoom in, and the sign-in page doesn't pop the keyboard up on load.

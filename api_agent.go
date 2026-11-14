@@ -534,6 +534,14 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request, ag *Agent) {
 		serverError(w, err)
 		return
 	}
+	// The admin chose this password and has seen it: the new agent replaces
+	// it with their own on first sign-in before anything else works.
+	must := true
+	if err := a.store.UpdateAgent(r.Context(), created.ID, AgentUpdate{MustChangePassword: &must}); err != nil {
+		serverError(w, err)
+		return
+	}
+	created.MustChangePassword = true
 	writeJSON(w, http.StatusCreated, map[string]any{"agent": created})
 }
 
@@ -604,6 +612,9 @@ func (a *App) updateAgent(w http.ResponseWriter, r *http.Request, ag *Agent) {
 			return
 		}
 		u.Hash = &h
+		// A reset password is temporary too: it must be replaced on next sign-in.
+		must := true
+		u.MustChangePassword = &must
 	}
 	if err := a.store.UpdateAgent(r.Context(), id, u); err != nil {
 		serverError(w, err)

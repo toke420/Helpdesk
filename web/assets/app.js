@@ -384,7 +384,7 @@ function renderFirstPassword() {
   },
     h('div', { class: 'logo', html: ICON_LOGO }),
     h('h1', {}, 'Set up your account'),
-    h('p', {}, 'Before you start, replace the setup password with your own. You can also set your real name and email here.'),
+    h('p', {}, 'Before you start, replace the temporary password you were given with your own. You can also check your name and email here.'),
     h('label', { class: 'field' }, 'Your name', name),
     h('label', { class: 'field' }, 'Email (you sign in with this)', email),
     h('label', { class: 'field' }, 'Current password', cur),
@@ -2048,7 +2048,7 @@ function passwordDialog({ title, intro, email, password }) {
     class: 'input pw-value', type: 'text', readonly: true, value: password, spellcheck: 'false',
     autocomplete: 'off', 'aria-label': 'Temporary password', onfocus: (e) => e.target.select(),
   });
-  const signIn = `Sign in to ${state.settings.brand_name || 'the help desk'}\n${state.baseUrl}\nEmail: ${email}\nTemporary password: ${password}\n\nAfter signing in, change it under Settings → Your account.`;
+  const signIn = `Sign in to ${state.settings.brand_name || 'the help desk'}\n${state.baseUrl}\nEmail: ${email}\nTemporary password: ${password}\n\nYou’ll be asked to choose your own password when you sign in.`;
   async function copy(text, btn, label) {
     let ok = false;
     try { await navigator.clipboard.writeText(text); ok = true; } catch { }
@@ -2065,7 +2065,7 @@ function passwordDialog({ title, intro, email, password }) {
   const dlg = simpleDialog(title,
     h('p', { style: 'margin:0 0 12px' }, intro),
     h('div', { class: 'field' }, h('span', {}, 'Temporary password'), field),
-    h('p', { class: 'small muted', style: 'margin:0 0 4px' }, 'This is the only time it’s shown. They can change it in Settings once they’ve signed in.'),
+    h('p', { class: 'small muted', style: 'margin:0 0 4px' }, 'This is the only time it’s shown. When they sign in with it, they’ll be asked to choose their own password.'),
     status,
     h('div', { class: 't-dialog-f' }, copyPw, copyAll, h('span', { style: 'flex:1' }),
       h('button', { type: 'button', class: 'btn ghost', onclick: () => dlg.close() }, 'Done')));
