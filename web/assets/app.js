@@ -486,8 +486,10 @@ function renderSidebar() {
     activitiesNav(route.kind === 'activities'),
     h('a', { class: 'nav-item' + (route.kind === 'cases' ? ' active' : ''), href: '#/cases' }, 'All cases'),
     h('a', { class: 'nav-item' + (route.kind === 'knowledge' ? ' active' : ''), href: '#/knowledge' }, 'Knowledge'),
-    state.settings.feedback_enabled === '1' || state.ideaPending ? h('a', { class: 'nav-item' + (route.kind === 'feedback' || route.kind === 'changelog' ? ' active' : ''), href: '#/feedback' }, 'Feedback',
+    state.settings.feedback_enabled === '1' || state.ideaPending ? h('a', { class: 'nav-item' + (route.kind === 'feedback' || route.kind === 'changelog' ? ' active' : ''), href: '#/feedback' }, 'Ideas',
       state.ideaPending ? h('span', { class: 'count hot', title: `${state.ideaPending} waiting for approval` }, state.ideaPending) : null) : null,
+    // The public board customers see; opens in a new tab so live chats keep running here.
+    h('a', { class: 'nav-item', href: '/feedback', target: '_blank', rel: 'noopener', title: 'Public feedback page (opens in a new tab)' }, 'Feedback'),
     h('a', { class: 'nav-item' + (route.kind === 'settings' ? ' active' : ''), href: '#/settings' }, 'Settings'),
     h('div', { class: 'spacer' }),
     h('div', { class: 'away-toggle', role: 'group', 'aria-label': 'Your status' },
