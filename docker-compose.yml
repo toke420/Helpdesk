@@ -9,7 +9,7 @@ services:
     # Using a shared Docker network with the proxy instead? Remove `ports`
     # and point the proxy at http://helpdesk:8080.
     ports:
-      - "127.0.0.1:8091:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - helpdesk-data:/data
     mem_limit: 128m
