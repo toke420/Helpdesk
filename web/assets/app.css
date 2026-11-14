@@ -580,3 +580,7 @@ a.seg-btn { display: inline-flex; align-items: center; text-decoration: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; transition-delay: 0s !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
 }
+
+/* ---------- temporary password dialog ---------- */
+.pw-value { font: 600 16px/1 var(--mono); letter-spacing: .04em; }
+.pw-status { min-height: 18px; margin: 0; color: var(--good); }

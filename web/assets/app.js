@@ -2039,6 +2039,41 @@ async function renderCases(params) {
   await load(false);
 }
 
+// Shows a new temporary password once, with buttons to copy it. Replaces the
+// browser's prompt(), which was hard to copy from on phones and read poorly
+// with screen readers.
+function passwordDialog({ title, intro, email, password }) {
+  const status = h('p', { class: 'pw-status small', role: 'status' });
+  const field = h('input', {
+    class: 'input pw-value', type: 'text', readonly: true, value: password, spellcheck: 'false',
+    autocomplete: 'off', 'aria-label': 'Temporary password', onfocus: (e) => e.target.select(),
+  });
+  const signIn = `Sign in to ${state.settings.brand_name || 'the help desk'}\n${state.baseUrl}\nEmail: ${email}\nTemporary password: ${password}\n\nAfter signing in, change it under Settings → Your account.`;
+  async function copy(text, btn, label) {
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch { }
+    if (!ok) { // no clipboard API (plain http, older browsers): copy from the field instead
+      field.focus(); field.select();
+      try { ok = document.execCommand('copy'); } catch { }
+    }
+    status.textContent = ok ? `${label} copied.` : 'Couldn’t copy — select the password and copy it yourself.';
+    status.style.color = ok ? '' : 'var(--bad)';
+    if (ok) { btn.textContent = 'Copied ✓'; setTimeout(() => { btn.textContent = label === 'Password' ? 'Copy password' : 'Copy sign-in details'; }, 2000); }
+  }
+  const copyPw = h('button', { type: 'button', class: 'btn primary', onclick: (e) => copy(password, e.currentTarget, 'Password') }, 'Copy password');
+  const copyAll = h('button', { type: 'button', class: 'btn', onclick: (e) => copy(signIn, e.currentTarget, 'Sign-in details') }, 'Copy sign-in details');
+  const dlg = simpleDialog(title,
+    h('p', { style: 'margin:0 0 12px' }, intro),
+    h('div', { class: 'field' }, h('span', {}, 'Temporary password'), field),
+    h('p', { class: 'small muted', style: 'margin:0 0 4px' }, 'This is the only time it’s shown. They can change it in Settings once they’ve signed in.'),
+    status,
+    h('div', { class: 't-dialog-f' }, copyPw, copyAll, h('span', { style: 'flex:1' }),
+      h('button', { type: 'button', class: 'btn ghost', onclick: () => dlg.close() }, 'Done')));
+  dlg.setAttribute('aria-label', title);
+  copyPw.focus();
+  return dlg;
+}
+
 function randomPassword() {
   const abc = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
   const b = crypto.getRandomValues(new Uint8Array(14));
@@ -2069,7 +2104,10 @@ function teamCard(isAdmin) {
         class: 'btn ghost', onclick: () => {
           const pw = randomPassword();
           if (!confirm(`Reset ${a.name}'s password? They'll be signed out everywhere.`)) return;
-          patch(a, { password: pw }, () => prompt(`New password for ${a.email} — copy it now:`, pw));
+          patch(a, { password: pw }, () => passwordDialog({
+            title: 'Password reset', email: a.email, password: pw,
+            intro: `Send ${a.name} this temporary password. They've been signed out everywhere.`,
+          }));
         },
       }, 'Reset password'),
       a.id !== state.me.id ? h('button', {
@@ -2095,8 +2133,12 @@ function teamCard(isAdmin) {
         const pw = randomPassword();
         try {
           await api('POST', '/api/agents', { name: name.value, email: email.value, role: role.value, password: pw });
-          prompt(`Agent added. Send ${email.value} this temporary password (they can change it in Settings):`, pw);
+          const who = { name: name.value.trim() || email.value, email: email.value };
           renderSettings();
+          passwordDialog({
+            title: 'Teammate added', email: who.email, password: pw,
+            intro: `Send ${who.name} these sign-in details.`,
+          });
         } catch (ex) { err.textContent = ex.message; }
       },
     },

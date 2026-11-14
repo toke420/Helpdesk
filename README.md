@@ -132,6 +132,16 @@ Local development: `go run .` (needs Go 1.24+), then open http://localhost:8080.
 
 Database changes apply automatically on start (tracked with SQLite's `user_version`). Back up `helpdesk.db` first, then `docker compose up -d --build`. Upgrading from v1 adds case categories and close times; cases that were already closed get their last message time as their close time. Upgrading to the AI release adds the Knowledge base, indexes your closed cases for Copilot on first start, and marks cases an agent already answered so the AI agent never jumps into them. Upgrading to the Activities release adds an empty task list; nothing else changes.
 
+### What's new in v1.0.5
+
+No database changes; upgrading only replaces the web app.
+
+- **Temporary password dialog.** Adding a teammate or resetting a password shows the new password in a dialog with *Copy password* and *Copy sign-in details* (address, email and password, ready to paste into a message), instead of the browser's prompt box.
+- **Accessibility.** Visible focus rings on the reply box and search, a *Skip to main content* link, and screen-reader announcements for widget notices.
+- **Fewer accidents.** Disabling an agent asks first, and leaving the article or changelog editor with unsaved changes asks before throwing them away.
+- **Phones.** The full-screen chat widget keeps clear of the notch and home bar, fields are 16px so iOS doesn't zoom in, and the sign-in page doesn't pop the keyboard up on load.
+- **Reduced motion** turns off every animation, including the widget's typing dots.
+
 ## Roadmap
 
 v2 email-to-conversation (IMAP), canned replies, attachments, search · v3 knowledge base, CSAT, tags · v4 reports, round-robin assignment, office hours, Slack/Discord webhooks.
